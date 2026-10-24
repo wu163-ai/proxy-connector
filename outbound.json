@@ -1,0 +1,7 @@
+{
+  "type": "socks",
+  "tag": "proxy",
+  "server": "1.2.3.4",
+  "server_port": 1080,
+  "version": "5"
+}

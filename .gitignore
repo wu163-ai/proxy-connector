@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# 本地配置（含私有代理地址和密码，绝不提交）
+socks5_connector.json
+
+# sing-box 源码（自己克隆，见 README）
+sing-box/
+sing-box-src/
+
+# 预编译二进制（体积大，按需构建或从 release 下载）
+bin/
+*.exe
+*.dll
+*.zip
+*.tar.gz
+
+# 本地记忆与缓存
+.workbuddy/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
