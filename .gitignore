@@ -6,6 +6,7 @@ __pycache__/
 venv/
 build/
 dist/
+*.spec
 
 # 本地配置（含私有代理地址和密码，绝不提交）
 socks5_connector.json

@@ -3,7 +3,20 @@
 
 from __future__ import annotations
 
+import os
 import socket
+import sys
+
+
+def app_dir() -> str:
+    """程序根目录。
+
+    源码运行时是仓库根目录；被 PyInstaller 打成 exe 后是 exe 所在目录，
+    这样 bin/ 、sing-box/ 、配置文件都能跟着 exe 走，而不是跑到解压的临时目录里。
+    """
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 class ProxyError(Exception):

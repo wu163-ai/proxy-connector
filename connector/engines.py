@@ -20,7 +20,7 @@ import tempfile
 import threading
 import time
 
-from .common import ProxyError, free_port, wait_port
+from .common import ProxyError, app_dir, free_port, wait_port
 from .upstream import Socks5Upstream, Upstream
 
 SINGBOX_REPO = "SagerNet/sing-box"
@@ -81,7 +81,7 @@ def find_singbox_source(explicit: str | None = None) -> str | None:
         if valid(env):
             return os.path.abspath(env)
 
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    root = app_dir()
     candidates = [
         os.path.join(root, "sing-box"),
         os.path.join(root, "sing-box-src"),
@@ -111,7 +111,7 @@ def find_singbox_binary(explicit: str | None = None) -> str | None:
     if env and os.path.isfile(env):
         return env
     names = ["sing-box.exe", "sing-box"] if os.name == "nt" else ["sing-box"]
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    root = app_dir()
     candidates = [root, os.path.join(root, "bin")]
     for folder in candidates:
         for name in names:

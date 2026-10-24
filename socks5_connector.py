@@ -39,7 +39,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from connector import __version__  # noqa: E402
-from connector.common import ProxyError, split_host_port  # noqa: E402
+from connector.common import ProxyError, app_dir, split_host_port  # noqa: E402
 from connector.engines import find_singbox_binary, install_singbox  # noqa: E402
 from connector.forward import HttpProxyServer, TcpTunnel  # noqa: E402
 from connector.nethttp import format_probe, http_fetch, probe  # noqa: E402
@@ -177,7 +177,7 @@ def _parse_listen(value: str) -> tuple[str, int]:
 
 def cmd_gui(args) -> int:
     """桌面图形界面（tkinter）。"""
-    base_dir = os.path.dirname(os.path.abspath(__file__))
+    base_dir = app_dir()
     config_path = os.path.join(base_dir, "socks5_connector.json")
     upstream = parse_upstream(args.proxy, source=args.source, go=args.go) if args.proxy else None
     try:
@@ -206,7 +206,7 @@ def _fatal(message: str) -> None:
 
 
 def cmd_web(args) -> int:
-    base_dir = os.path.dirname(os.path.abspath(__file__))
+    base_dir = app_dir()
     config_path = os.path.join(base_dir, "socks5_connector.json")
     upstream = None
     if args.proxy:
@@ -345,7 +345,7 @@ def cmd_proxy(args) -> int:
 
 
 def cmd_install(args) -> int:
-    dest = args.dir or os.path.join(os.path.dirname(os.path.abspath(__file__)), "bin")
+    dest = args.dir or os.path.join(app_dir(), "bin")
     downloader = None
     if args.proxy:
         downloader = _build_upstream(argparse.Namespace(

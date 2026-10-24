@@ -13,7 +13,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import __version__
-from .common import ProxyError, split_host_port
+from .common import ProxyError, app_dir, split_host_port
 from .engines import find_singbox_binary, install_singbox
 from .forward import HttpProxyServer, TcpTunnel
 from .nethttp import format_probe, http_fetch, http_request_via, probe
@@ -704,7 +704,7 @@ class ControlPanel:
                 downloader = None
                 if use_proxy:
                     downloader = self.upstream if self.upstream.kind not in ("singbox",) else DirectUpstream()
-                dest = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin")
+                dest = os.path.join(app_dir(), "bin")
                 install_singbox(dest, upstream=downloader, log=lambda m: self.log("INFO", m))
                 self.singbox_info(refresh=True)
                 self.log("OK", "sing-box 安装完成")

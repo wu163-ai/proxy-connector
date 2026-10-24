@@ -157,6 +157,25 @@ python socks5_connector.py probe --proxy config.json --target www.google.com:443
 
 命令行无法传递 SSH 密码是 OpenSSH 的设计限制，所以密码登录只能走 sing-box。填私钥路径时 OpenSSH 引擎可直接用。
 
+## 打包成 exe
+
+需要 PyInstaller（`py -3.14 -m pip install pyinstaller`），然后双击 `build-exe.bat`，或：
+
+```bash
+py -3.14 -m PyInstaller --noconfirm --clean -F -w -n proxy-connector --collect-submodules connector socks5_connector.py
+```
+
+产物 `dist\proxy-connector.exe`，约 13 MB，单文件，双击即用，目标机器不需要装 Python。
+
+几个要点：
+
+- **位置**：exe 和 `bin\`、`sing-box\` 放同一目录。程序会按 exe 所在位置找内核和配置文件
+  （`sys.frozen` 判断），不会跑到打包时的临时解压目录里。
+- **`-w`**：无控制台模式，适合纯 GUI。要用 `probe` / `fetch` 这些命令就留着控制台，
+  去掉 `-w` 重新打包。
+- **启动耗时**：单文件模式启动时先解压到临时目录，首启多 1–2 秒。
+- **体积**：13 MB 里大头是 Python 运行时 + tkinter/Tcl，不是代码。
+
 ## 代码结构
 
 ```
