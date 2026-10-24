@@ -79,17 +79,37 @@ class Upstream:
 # SOCKS5
 # --------------------------------------------------------------------------
 
+def _resolve_local(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    """本地 DNS 模式：自己解析成 IP，优先 IPv4。"""
+    try:
+        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+    except OSError as exc:
+        raise ProxyError(f"本地解析域名失败: {host} -> {exc}") from exc
+    v6 = None
+    for family, _type, _proto, _canon, sockaddr in infos:
+        addr = sockaddr[0]
+        if family == socket.AF_INET:
+            return ipaddress.ip_address(addr)
+        if family == socket.AF_INET6 and v6 is None:
+            v6 = addr
+    if v6:
+        return ipaddress.ip_address(v6)
+    raise ProxyError(f"本地解析域名无结果: {host}")
+
+
 def encode_address(host: str, remote_dns: bool) -> bytes:
-    """按 ATYP 规则编码目标地址；remote_dns=True 时域名交给代理侧解析。"""
+    """按 ATYP 规则编码目标地址。
+
+    remote_dns=True  -> 域名直接塞进请求，交给代理侧解析（不泄漏本地 DNS）
+    remote_dns=False -> 本地解析成 IP 再塞进去
+    """
     host = host.strip().strip("[]")
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
         if not remote_dns:
-            raise ProxyError(
-                f"目标是域名 '{host}'，但当前为本地 DNS 模式(socks5://)，"
-                "请改用 socks5h:// 或勾选“远程 DNS”"
-            )
+            ip = _resolve_local(host)
+            return bytes([ATYP_IPV4 if ip.version == 4 else ATYP_IPV6]) + ip.packed
         raw = host.encode("idna")
         if len(raw) > 255:
             raise ProxyError("域名过长")
@@ -97,9 +117,18 @@ def encode_address(host: str, remote_dns: bool) -> bytes:
     return bytes([ATYP_IPV4 if ip.version == 4 else ATYP_IPV6]) + ip.packed
 
 
+# 这些错误是确定性的，重试没有意义
+_DETERMINISTIC_HINTS = ("认证", "拒绝 CONNECT", "非 SOCKS5", "域名过长",
+                        "解析域名", "版本号异常", "不支持")
+
+
+def _is_transient(exc: ProxyError) -> bool:
+    text = str(exc)
+    return not any(hint in text for hint in _DETERMINISTIC_HINTS)
+
+
 class Socks5Upstream(Upstream):
     """RFC 1928 / RFC 1929 客户端。"""
-
     kind = "socks5"
 
     def __init__(self, host: str, port: int = 1080, username: str | None = None,
@@ -131,6 +160,21 @@ class Socks5Upstream(Upstream):
     # ---- 连接 ----
     def connect(self, host: str, port: int, timeout: float | None = None) -> socket.socket:
         t = float(timeout or self.timeout)
+        # 上游对某些目标存在握手瞬断，重试一次能把偶发失败压掉；确定性错误不重试
+        for attempt in (1, 2):
+            try:
+                return self._connect_once(host, port, t)
+            except ProxyError as exc:
+                if attempt == 1 and _is_transient(exc):
+                    continue
+                raise
+            except OSError:
+                if attempt == 1:
+                    continue
+                raise
+        raise ProxyError("连接 SOCKS5 代理失败")
+
+    def _connect_once(self, host: str, port: int, t: float) -> socket.socket:
         try:
             sock = socket.create_connection((self.host, self.port), timeout=t)
         except OSError as exc:

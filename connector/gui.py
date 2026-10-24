@@ -20,8 +20,10 @@ from tkinter import messagebox, ttk
 from . import __version__
 from .common import split_host_port
 from .engines import find_go_binary, find_singbox_binary, find_singbox_source
-from .forward import HttpProxyServer, TcpTunnel
+from .forward import TcpTunnel
+from .localproxy import MixedProxy
 from .nethttp import format_probe, http_fetch, probe
+from .sysproxy import SystemProxy
 from .upstream import DirectUpstream, Socks5Upstream, Upstream, upstream_from_dict
 
 FONT = ("Microsoft YaHei UI", 9)
@@ -72,8 +74,16 @@ class GuiApp:
         self.config_path = config_path
         self.upstream: Upstream = upstream or Socks5Upstream("127.0.0.1", 1080)
         self.tunnel: TcpTunnel | None = None
-        self.http_proxy: HttpProxyServer | None = None
+        self.proxy: MixedProxy | None = None
+        self.sysproxy = SystemProxy(
+            state_path=(os.path.join(os.path.dirname(os.path.abspath(config_path)),
+                                     "system_proxy_backup.json")
+                        if config_path else None),
+            log=self.log)
         self.last_target = ""
+        self.local_port = 1081
+        self.use_system = True
+        self._connected = False
         self._has_upstream = False
         self._log_queue: queue.Queue = queue.Queue()
         self._busy = False
@@ -93,8 +103,11 @@ class GuiApp:
             self._fill_form(self.upstream)
         else:
             self._clear_form()
+        self.local_port_var.set(str(self.local_port))
+        self.use_system_var.set(self.use_system)
         self._update_status()
         self._poll_logs()
+        self.sysproxy.restore_leftover()  # 上次异常退出可能没还原系统代理
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ------------------------------------------------------------------
@@ -140,11 +153,22 @@ class GuiApp:
         ttk.Label(top, text="超时(秒)").pack(side="left")
         self.timeout_var = tk.StringVar(value="20")
         ttk.Spinbox(top, from_=1, to=600, textvariable=self.timeout_var,
-                    width=6).pack(side="left", padx=(6, 0))
+                    width=6).pack(side="left", padx=(6, 18))
+
+        ttk.Label(top, text="本地端口").pack(side="left")
+        self.local_port_var = tk.StringVar(value="1081")
+        ttk.Spinbox(top, from_=1, to=65535, textvariable=self.local_port_var,
+                    width=7).pack(side="left", padx=(6, 12))
+        self.use_system_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(top, text="接管系统代理", variable=self.use_system_var).pack(side="left")
 
         self.btn_test_top = ttk.Button(top, text="测试连通性", command=self.do_probe)
         self.btn_test_top.pack(side="right")
-        ttk.Button(top, text="连接", command=self.apply_config).pack(side="right", padx=6)
+        self.btn_disconnect = ttk.Button(top, text="断开", command=self.disconnect,
+                                        state="disabled")
+        self.btn_disconnect.pack(side="right", padx=(6, 0))
+        self.btn_connect = ttk.Button(top, text="连接", command=self.apply_config)
+        self.btn_connect.pack(side="right", padx=6)
 
         area = ttk.Frame(card)
         area.grid(row=1, column=0, sticky="ew", pady=(10, 0))
@@ -343,27 +367,22 @@ class GuiApp:
         self._write(self.txt_tun, "本地监听一个 TCP 端口，所有连接经上游送到目标。适合 SSH / MySQL / RDP 等任意 TCP 服务。\n")
 
     def _build_http_proxy_page(self) -> None:
+        """已并入「连接」：本地混合代理同时提供 HTTP 与 SOCKS5，这里只显示状态。"""
         page = ttk.Frame(self.nb, padding=10)
-        self.nb.add(page, text="  本地 HTTP 代理  ")
+        self.nb.add(page, text="  本地代理状态  ")
         page.columnconfigure(0, weight=1)
-        page.rowconfigure(2, weight=1)
+        page.rowconfigure(1, weight=1)
 
-        bar = ttk.Frame(page)
-        bar.grid(row=0, column=0, sticky="ew")
-        ttk.Label(bar, text="端口").pack(side="left")
-        self.v_hp_port = tk.StringVar(value="1081")
-        ttk.Entry(bar, textvariable=self.v_hp_port, width=8).pack(side="left", padx=6)
-        self.btn_hp_start = ttk.Button(bar, text="启动", command=self.do_http_proxy_start)
-        self.btn_hp_start.pack(side="left", padx=(12, 0))
-        self.btn_hp_stop = ttk.Button(bar, text="停止", command=self.do_http_proxy_stop, state="disabled")
-        self.btn_hp_stop.pack(side="left", padx=6)
-
-        self.lbl_hp = ttk.Label(page, text="未启动", style="Hint.TLabel")
-        self.lbl_hp.grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self.lbl_hp = ttk.Label(page, text="未连接", style="Hint.TLabel")
+        self.lbl_hp.grid(row=0, column=0, sticky="w")
 
         wrap, self.txt_hp = self._text_panel(page)
-        wrap.grid(row=2, column=0, sticky="nsew", pady=(8, 0))
-        self._write(self.txt_hp, "把上游包装成本地 HTTP 代理，给只支持 HTTP 代理的软件用（普通请求和 HTTPS CONNECT 都支持）。\n")
+        wrap.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+        self._write(self.txt_hp,
+                    "点上方「连接」后，本机会监听一个混合端口，同时支持：\n"
+                    "  · HTTP/HTTPS 代理（浏览器、系统代理、只认 HTTP 代理的软件）\n"
+                    "  · SOCKS5（支持 socks5 的软件、curl --socks5-hostname）\n"
+                    "地址形如 127.0.0.1:1081，端口可在上方「本地端口」修改。\n")
 
     def _build_log(self) -> None:
         card = ttk.LabelFrame(self.root, text=" 运行日志 ", padding=(8, 6))
@@ -459,6 +478,10 @@ class GuiApp:
             self.upstream = upstream_from_dict(payload, log=self.log)
             self._has_upstream = True
             self.last_target = str(data.get("last_target") or "")
+            if data.get("local_port"):
+                self.local_port = int(data["local_port"])
+            if "use_system" in data:
+                self.use_system = bool(data["use_system"])
             self.log("INFO", f"已载入配置: {self.upstream.describe()}")
             return True
         except Exception as exc:  # noqa: BLE001
@@ -468,7 +491,8 @@ class GuiApp:
     def _save_config(self) -> None:
         if not self.config_path:
             return
-        data = {"upstream": self.upstream.to_dict(), "last_target": self.last_target}
+        data = {"upstream": self.upstream.to_dict(), "last_target": self.last_target,
+                "local_port": self.local_port, "use_system": self.use_system}
         try:
             with open(self.config_path, "w", encoding="utf-8") as fh:
                 json.dump(data, fh, ensure_ascii=False, indent=2)
@@ -608,11 +632,15 @@ class GuiApp:
             engine = f"sing-box {os.path.basename(binary)}"
         else:
             engine = "sing-box 未找到源码或可执行文件"
-        if self._has_upstream:
-            text = f"已连接  {self.upstream.describe()}    |    {engine}"
+        if self._connected and self.proxy and self.proxy.running:
+            mode = "系统代理已接管" if self.sysproxy.active else "仅本地端口"
+            text = (f"已连接  127.0.0.1:{self.proxy.port} (SOCKS5+HTTP) -> "
+                    f"{self.upstream.describe()}    |    {mode}")
+        elif self._has_upstream:
+            text = f"未连接 · 参数已就绪 {self.upstream.describe()}"
         else:
-            text = f"未连接 · 选择类型并填写地址后点「连接」    |    {engine}"
-        self.status_label.configure(text=text)
+            text = "未连接 · 选择类型并填写地址后点「连接」"
+        self.status_label.configure(text=f"{text}    |    {engine}")
 
     def _set_busy(self, busy: bool, text: str = "") -> None:
         self._busy = busy
@@ -642,17 +670,17 @@ class GuiApp:
     # 动作
     # ------------------------------------------------------------------
     def apply_config(self) -> None:
+        """连接：拉起本地混合代理（SOCKS5+HTTP），按需接管系统代理。"""
         try:
             payload = self._collect_config()
-        except (ValueError, TypeError) as exc:
-            messagebox.showerror("配置错误", str(exc))
-            return
-        try:
             new_upstream = upstream_from_dict(payload, log=self.log)
+            port = self._local_port()
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("配置错误", str(exc))
             return
+
         old = self.upstream
+        self._stop_proxy()
         if old is not new_upstream:
             try:
                 old.stop()
@@ -660,9 +688,80 @@ class GuiApp:
                 pass
         self.upstream = new_upstream
         self._has_upstream = True
+        self.use_system = bool(self.use_system_var.get())
         self._save_config()
+
+        proxy = MixedProxy(new_upstream, "127.0.0.1", port, self.log)
+        try:
+            proxy.start()
+        except Exception as exc:  # noqa: BLE001
+            self._connected = False
+            self._update_status()
+            messagebox.showerror("连接失败", str(exc))
+            return
+        self.proxy = proxy
+        self._connected = True
+        self.btn_connect.configure(state="disabled")
+        self.btn_disconnect.configure(state="normal")
+
+        if self.use_system:
+            self.sysproxy.enable(f"127.0.0.1:{proxy.port}")
+        else:
+            self.log("INFO", "未接管系统代理，仅提供本地端口 127.0.0.1:%d" % proxy.port)
+
         self._update_status()
-        self.log("INFO", f"已连接: {new_upstream.describe()}")
+        self.lbl_hp.configure(text=f"运行中：127.0.0.1:{proxy.port}（SOCKS5 + HTTP）",
+                             style="Good.TLabel")
+        self.log("OK", f"已连接  本地 127.0.0.1:{proxy.port} (SOCKS5+HTTP) "
+                       f"-> {new_upstream.describe()}")
+        self._verify_link(proxy.port)
+
+    def disconnect(self) -> None:
+        """断开：停监听 + 还原系统代理。"""
+        self._stop_proxy()
+        self.sysproxy.disable()
+        self._connected = False
+        self.btn_connect.configure(state="normal")
+        self.btn_disconnect.configure(state="disabled")
+        self.lbl_hp.configure(text="未连接", style="Hint.TLabel")
+        self._update_status()
+        self.log("INFO", "已断开")
+
+    def _stop_proxy(self) -> None:
+        if self.proxy is not None:
+            try:
+                self.proxy.stop()
+            except Exception:  # noqa: BLE001
+                pass
+            self.proxy = None
+
+    def _local_port(self) -> int:
+        try:
+            port = int(self.local_port_var.get() or 1081)
+        except (TypeError, ValueError):
+            raise ValueError("本地端口必须是数字") from None
+        if not 0 < port < 65536:
+            raise ValueError("本地端口无效")
+        return port
+
+    def _verify_link(self, port: int) -> None:
+        """连上后自检：经本地代理实际访问一次，证明链路真通。"""
+        timeout = self._timeout()
+
+        def worker() -> None:
+            try:
+                result = probe(Socks5Upstream("127.0.0.1", port, timeout=timeout),
+                               "api.ipify.org", 443, use_tls=True, timeout=timeout)
+            except Exception as exc:  # noqa: BLE001
+                self.log("WARN", f"链路自检异常: {exc}")
+                return
+            if result["ok"]:
+                self.log("OK", f"链路自检通过：经本地代理访问 api.ipify.org:443 "
+                               f"{result['total_ms']} ms")
+            else:
+                self.log("WARN", f"链路自检失败: {result['error']}")
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _apply_silent(self) -> bool:
         try:
@@ -674,17 +773,38 @@ class GuiApp:
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("配置错误", str(exc))
             return False
-        if self.upstream.to_dict() != new_upstream.to_dict():
+        if self.upstream.to_dict() == new_upstream.to_dict():
+            return True
+        old = self.upstream
+        if old is not new_upstream:
             try:
-                self.upstream.stop()
+                old.stop()
             except Exception:  # noqa: BLE001
                 pass
-            self.upstream = new_upstream
-            self._has_upstream = True
-            self._save_config()
-            self._update_status()
-            self.log("INFO", f"配置已更新: {new_upstream.describe()}")
+        self.upstream = new_upstream
+        self._has_upstream = True
+        self._save_config()
+        if self._connected:
+            self._restart_proxy()
+        self._update_status()
+        self.log("INFO", f"配置已更新: {new_upstream.describe()}")
         return True
+
+    def _restart_proxy(self) -> None:
+        """已连接状态下换了上游：把本地监听按原端口重启到新上游。"""
+        port = self.proxy.port if self.proxy else self._local_port()
+        self._stop_proxy()
+        proxy = MixedProxy(self.upstream, "127.0.0.1", port, self.log)
+        try:
+            proxy.start()
+        except Exception as exc:  # noqa: BLE001
+            self._connected = False
+            self.btn_connect.configure(state="normal")
+            self.btn_disconnect.configure(state="disabled")
+            self.log("ERROR", f"按新配置重连失败: {exc}")
+            return
+        self.proxy = proxy
+        self.log("OK", f"已按新上游重启本地代理 127.0.0.1:{proxy.port}")
 
     def do_probe(self) -> None:
         if self._busy:
@@ -791,36 +911,8 @@ class GuiApp:
         self.btn_tun_start.configure(state="normal")
         self.btn_tun_stop.configure(state="disabled")
 
-    def do_http_proxy_start(self) -> None:
-        if not self._apply_silent():
-            return
-        try:
-            port = int(self.v_hp_port.get().strip() or "1081")
-        except ValueError:
-            messagebox.showerror("参数错误", "端口必须是数字")
-            return
-        if self.http_proxy and self.http_proxy.running:
-            self.http_proxy.stop()
-        try:
-            server = HttpProxyServer(self.upstream, "127.0.0.1", port, self.log)
-            server.start()
-        except Exception as exc:  # noqa: BLE001
-            messagebox.showerror("启动失败", str(exc))
-            return
-        self.http_proxy = server
-        self.v_hp_port.set(str(server.port))
-        self.lbl_hp.configure(text=f"运行中：HTTP 代理 127.0.0.1:{server.port}", style="Good.TLabel")
-        self.btn_hp_start.configure(state="disabled")
-        self.btn_hp_stop.configure(state="normal")
-        self._write(self.txt_hp, f"已启动 http://127.0.0.1:{server.port}\n"
-                                 f"在浏览器或软件里把 HTTP 代理设成这个地址即可。\n")
-
     def do_http_proxy_stop(self) -> None:
-        if self.http_proxy:
-            self.http_proxy.stop()
-        self.lbl_hp.configure(text="已停止", style="Hint.TLabel")
-        self.btn_hp_start.configure(state="normal")
-        self.btn_hp_stop.configure(state="disabled")
+        self.disconnect()
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -834,10 +926,10 @@ class GuiApp:
 
     def _on_close(self) -> None:
         try:
-            if self.http_proxy and self.http_proxy.running:
-                self.http_proxy.stop()
             if self.tunnel and self.tunnel.running:
                 self.tunnel.stop()
+            self._stop_proxy()
+            self.sysproxy.disable()  # 关窗必须还原，否则系统代理指向死端口
             self.upstream.stop()
         except Exception:  # noqa: BLE001
             pass

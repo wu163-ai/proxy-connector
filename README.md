@@ -1,6 +1,6 @@
 # 代理连接器 v2
 
-一个纯 Python 标准库实现的代理客户端/连接器。上游支持 **SOCKS5 / HTTP / SSH / sing-box 任意出站协议**，统一转换成"能连任意目标"的管道，再往外提供端口转发、本地 HTTP 代理和桌面图形界面。
+一个纯 Python 标准库实现的代理连接器。上游支持 **SOCKS5 / HTTP / SSH / sing-box 任意出站协议**，点一次「连接」就在本机开监听并持有系统代理，浏览器和各类软件立刻走代理。
 
 零第三方依赖。sing-box 只是一个可选内核，只在需要高级协议（shadowsocks、vmess、trojan、hysteria2 等）时才会用到。
 
@@ -26,7 +26,29 @@ python socks5_connector.py
 
 ![界面](gui.png)
 
-顶部选上游类型、填参数，点「连接」；「测试连通性」会分段显示内核启动 / CONNECT / TLS 的耗时。下面四个分页分别是探测、HTTP 测试、端口转发、本地 HTTP 代理。底部是实时日志。
+顶部选上游类型、填参数、设本地端口，点「连接」。
+
+## 「连接」到底做了什么
+
+不是只存个配置。点下去依次做四件事：
+
+1. 在 `127.0.0.1:1081` 起一个**本地混合代理**，同一端口同时支持 SOCKS5 和 HTTP/HTTPS 代理
+2. 把这个端口写进 **Windows 系统代理**（`HKCU\...\Internet Settings`，备份原值后覆盖）
+3. 通知 WinINET 刷新，浏览器、Edge、Chrome 以及所有读系统代理的软件立即生效
+4. 后台自检：经本地代理实际访问一次 `api.ipify.org:443`，成功才在日志里打「链路自检通过」
+
+点「断开」或直接关窗口：停监听、**把系统代理精确还原**成连接前的值。异常退出也不会留下坏设置——下次启动会检测到备份文件并自动恢复。
+
+不想动系统代理，就取消勾选「接管系统代理」，此时只保留本地端口，自己配到浏览器或软件里。
+
+端口同时是 SOCKS5：
+
+```bash
+curl --socks5-hostname 127.0.0.1:1081 https://api.ipify.org
+curl -x http://127.0.0.1:1081 https://api.ipify.org
+```
+
+下面四个分页分别是探测、HTTP 测试、端口转发、本地代理状态。底部是实时日志。
 
 配置写在同目录 `socks5_connector.json`，v1 的老配置能自动识别。
 
@@ -185,7 +207,9 @@ connector/
   upstream.py            Upstream 抽象 + SOCKS5 / HTTP / 直连实现 + 从字符串/字典构造
   engines.py             sing-box（go run 源码 / 可执行文件）与 OpenSSH 子进程引擎
   nethttp.py             基于任意上游的 HTTP 客户端、探测、流式下载
-  forward.py             TCP 端口转发、本地 HTTP 代理
+  forward.py             TCP 端口转发、HTTP 代理处理逻辑
+  localproxy.py          本地混合代理入站（SOCKS5 + HTTP 同端口）——「连接」的核心
+  sysproxy.py            Windows 系统代理备份 / 设置 / 还原（注册表 + WinINET 刷新）
   gui.py                 桌面图形界面（tkinter，默认入口）
   panel.py               Web 控制台（浏览器版，可选）
 ```
@@ -208,8 +232,11 @@ sock = upstream.connect("example.com", 443, timeout=10)
 | `代理内部错误（内核日志: dial tcp ... refused）` | 内核连不上真实服务器，看括号里的原始错误 |
 | `SSH 密码登录需要 sing-box 引擎` | 没装 sing-box，又用了密码；装内核或改密钥 |
 | `sing-box 启动失败: ...` | 括号里是 sing-box 自己的报错，通常是配置字段不合法 |
-| 域名目标报"本地 DNS 模式" | 换 `socks5h://` 或勾远程 DNS |
+| 系统代理设了但浏览器不走代理 | 机器上另有 PAC 脚本（`AutoConfigURL`），它的优先级高于手动代理，日志会告警 |
+| 连接成功但某些软件还是直连 | 该软件不读系统代理（游戏、多数原生程序），见「已知边界」 |
 
 ## 已知边界
 
-转发和 HTTP 代理是"每连接一线程"，几十到几百并发没问题，上千连接要换 asyncio。sing-box 内核是按需懒启动，第一次连接会多 1-2 秒的启动耗时（页面会提示"首次连接需要拉起内核"）。
+**系统代理只覆盖读 Windows 代理设置的程序**：Chrome/Edge/IE、大多数 .NET 应用、装了系统代理支持的软件。不读系统代理的程序（游戏、部分原生客户端、命令行工具）照样直连——要全量接管得走 TUN 模式，那是下一个阶段的事。
+
+转发和本地代理是"每连接一线程"，几十到几百并发没问题，上千连接要换 asyncio。sing-box 内核按需懒启动，第一次连接会多十几秒（源码模式是 go run 编译链接的开销）。

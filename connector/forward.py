@@ -187,6 +187,10 @@ class HttpProxyServer:
                 break
             threading.Thread(target=self._handle, args=(client, addr), daemon=True).start()
 
+    def serve_once(self, client: socket.socket, addr) -> None:
+        """处理一条已接入的客户端连接（供混合代理复用）。"""
+        self._handle(client, addr)
+
     def _handle(self, client: socket.socket, addr) -> None:
         self.requests += 1
         remote = None
