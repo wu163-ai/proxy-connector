@@ -18,7 +18,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from . import __version__
-from .common import split_host_port
+from .common import app_dir, split_host_port
 from .engines import find_go_binary, find_singbox_binary, find_singbox_source
 from .forward import TcpTunnel
 from .localproxy import MixedProxy
@@ -75,10 +75,11 @@ class GuiApp:
         self.upstream: Upstream = upstream or Socks5Upstream("127.0.0.1", 1080)
         self.tunnel: TcpTunnel | None = None
         self.proxy: MixedProxy | None = None
+        # 备份文件必须落盘：没有它就无法把系统代理精确还原
+        state_dir = (os.path.dirname(os.path.abspath(config_path))
+                     if config_path else app_dir())
         self.sysproxy = SystemProxy(
-            state_path=(os.path.join(os.path.dirname(os.path.abspath(config_path)),
-                                     "system_proxy_backup.json")
-                        if config_path else None),
+            state_path=os.path.join(state_dir, "system_proxy_backup.json"),
             log=self.log)
         self.last_target = ""
         self.local_port = 1081
@@ -240,6 +241,12 @@ class GuiApp:
         ttk.Label(cell, text="引擎").pack(anchor="w")
         ttk.Combobox(cell, textvariable=self.v_q_engine, state="readonly", width=26,
                      values=["auto", "singbox", "openssh"]).pack(fill="x")
+        cell2 = ttk.Frame(frame)
+        cell2.grid(row=1, column=2, sticky="ew", padx=(0, 12), pady=(0, 6))
+        ttk.Label(cell2, text="sing-box 运行时").pack(anchor="w")
+        self.v_q_runtime = tk.StringVar(value="auto")
+        ttk.Combobox(cell2, textvariable=self.v_q_runtime, state="readonly", width=10,
+                     values=["auto", "source", "binary"]).pack(fill="x")
         ttk.Label(frame, text="密码登录需要 sing-box 内核；纯密钥可直接用系统 OpenSSH。",
                   style="Hint.TLabel").grid(row=2, column=0, columnspan=4, sticky="w")
         return frame
@@ -258,6 +265,12 @@ class GuiApp:
                    command=lambda: self._sb_template("ssh")).pack(side="left")
         ttk.Button(bar, text="SOCKS 模板",
                    command=lambda: self._sb_template("socks")).pack(side="left", padx=6)
+        ttk.Label(bar, text="运行时").pack(side="left", padx=(16, 0))
+        self.v_sb_runtime = tk.StringVar(value="auto")
+        ttk.Combobox(bar, textvariable=self.v_sb_runtime, state="readonly", width=9,
+                     values=["auto", "source", "binary"]).pack(side="left", padx=6)
+        ttk.Label(bar, text="source=go run 源码 / binary=bin/sing-box.exe",
+                  style="Hint.TLabel").pack(side="left", padx=4)
         ttk.Label(bar, text="支持 ss / vmess / vless / trojan / hysteria2 / tuic / anytls …",
                   style="Hint.TLabel").pack(side="left", padx=8)
         return frame
@@ -295,6 +308,7 @@ class GuiApp:
         self._build_fetch_page()
         self._build_tunnel_page()
         self._build_http_proxy_page()
+        self._build_kernel_page()
 
     def _build_probe_page(self) -> None:
         page = ttk.Frame(self.nb, padding=10)
@@ -384,6 +398,45 @@ class GuiApp:
                     "  · SOCKS5（支持 socks5 的软件、curl --socks5-hostname）\n"
                     "地址形如 127.0.0.1:1081，端口可在上方「本地端口」修改。\n")
 
+    def _build_kernel_page(self) -> None:
+        """sing-box / ssh 内核的原始输出，一行不改，原样展示。"""
+        page = ttk.Frame(self.nb, padding=10)
+        self.nb.add(page, text="  内核日志  ")
+        self.page_kernel = page
+        page.columnconfigure(0, weight=1)
+        page.rowconfigure(1, weight=1)
+
+        bar = ttk.Frame(page)
+        bar.grid(row=0, column=0, sticky="ew")
+        self.lbl_kernel = ttk.Label(bar, text="内核未启动（用 sing-box / SSH 上游时才会有输出）",
+                                    style="Hint.TLabel")
+        self.lbl_kernel.pack(side="left")
+        ttk.Button(bar, text="清空", command=self._clear_kernel).pack(side="right")
+        ttk.Button(bar, text="复制全部", command=self._copy_kernel).pack(side="right", padx=6)
+        self.v_kernel_follow = tk.BooleanVar(value=True)
+        ttk.Checkbutton(bar, text="自动滚动",
+                        variable=self.v_kernel_follow).pack(side="right", padx=6)
+
+        wrap = ttk.Frame(page)
+        wrap.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+        wrap.columnconfigure(0, weight=1)
+        wrap.rowconfigure(0, weight=1)
+        self.txt_kernel = tk.Text(wrap, wrap="none", font=MONO, state="disabled",
+                                  bg="#0b1220", fg="#cbd5e1", relief="flat",
+                                  padx=8, pady=6)
+        scroll = ttk.Scrollbar(wrap, orient="vertical", command=self.txt_kernel.yview)
+        self.txt_kernel.configure(yscrollcommand=scroll.set)
+        self.txt_kernel.grid(row=0, column=0, sticky="nsew")
+        scroll.grid(row=0, column=1, sticky="ns")
+        self.txt_kernel.tag_configure("err", foreground="#fca5a5")
+        self.txt_kernel.tag_configure("warn", foreground="#fcd34d")
+        self.txt_kernel.tag_configure("ok", foreground="#86efac")
+        self.txt_kernel.tag_configure("dim", foreground="#94a3b8")
+        self._kernel_lines = 0
+        self._kernel_switched = False
+        self._write(self.txt_kernel, "等你点「连接」并且上游是 sing-box / SSH 时，"
+                                     "这里会滚动显示内核的真实 stdout/stderr。\n")
+
     def _build_log(self) -> None:
         card = ttk.LabelFrame(self.root, text=" 运行日志 ", padding=(8, 6))
         card.grid(row=2, column=0, sticky="nsew", padx=12, pady=(0, 12))
@@ -420,7 +473,7 @@ class GuiApp:
 
     def _poll_logs(self) -> None:
         try:
-            for _ in range(200):
+            for _ in range(600):
                 level, message = self._log_queue.get_nowait()
                 self._append_log(level, message)
         except queue.Empty:
@@ -428,6 +481,9 @@ class GuiApp:
         self.root.after(120, self._poll_logs)
 
     def _append_log(self, level: str, message: str) -> None:
+        if level == "KERNEL":
+            self._append_kernel(message)
+            return
         text = self.txt_log
         text.configure(state="normal")
         text.insert("end", f"{time.strftime('%H:%M:%S')}  {message}\n", level)
@@ -436,6 +492,49 @@ class GuiApp:
             text.delete("1.0", f"{lines - 600}.0")
         text.configure(state="disabled")
         text.see("end")
+
+    def _append_kernel(self, message: str) -> None:
+        """内核原始行：不改写、不缩略，只按关键字染色。"""
+        low = message.lower()
+        if "error" in low or "fatal" in low or "failed" in low or "panic" in low:
+            tag = "err"
+        elif "warn" in low:
+            tag = "warn"
+        elif "started" in low or "listening" in low or "sing-box started" in low:
+            tag = "ok"
+        elif low.startswith(("go:", "#", "building", "compiling")):
+            tag = "dim"
+        else:
+            tag = ""
+
+        text = self.txt_kernel
+        text.configure(state="normal")
+        text.insert("end", message + "\n", tag)
+        self._kernel_lines += 1
+        if self._kernel_lines > 4000:
+            text.delete("1.0", "500.0")
+            self._kernel_lines -= 500
+        text.configure(state="disabled")
+        if self.v_kernel_follow.get():
+            text.see("end")
+
+        self.lbl_kernel.configure(text=f"内核输出 {self._kernel_lines} 行")
+        if not self._kernel_switched:
+            self._kernel_switched = True
+            self.nb.select(self.page_kernel)
+
+    def _clear_kernel(self) -> None:
+        self.txt_kernel.configure(state="normal")
+        self.txt_kernel.delete("1.0", "end")
+        self.txt_kernel.configure(state="disabled")
+        self._kernel_lines = 0
+        self.lbl_kernel.configure(text="内核日志已清空")
+
+    def _copy_kernel(self) -> None:
+        body = self.txt_kernel.get("1.0", "end-1c")
+        self.root.clipboard_clear()
+        self.root.clipboard_append(body)
+        self.lbl_kernel.configure(text=f"已复制 {body.count(chr(10)) + 1} 行到剪贴板")
 
     def _clear_log(self) -> None:
         self.txt_log.configure(state="normal")
@@ -550,6 +649,7 @@ class GuiApp:
                 "password": self.v_q_pass.get(),
                 "key_path": self.v_q_key.get().strip(),
                 "engine": self.v_q_engine.get() or "auto",
+                "runtime": self.v_q_runtime.get() or "auto",
             })
         elif kind == "singbox":
             raw = self.txt_sb.get("1.0", "end").strip()
@@ -562,6 +662,7 @@ class GuiApp:
             if not isinstance(outbound, dict) or "type" not in outbound:
                 raise ValueError("outbound 必须是含 type 字段的对象")
             payload["outbound"] = outbound
+            payload["runtime"] = self.v_sb_runtime.get() or "auto"
         return payload
 
     def _fill_form(self, upstream: Upstream) -> None:
@@ -589,7 +690,9 @@ class GuiApp:
             self.v_q_pass.set(data.get("password", "") or "")
             self.v_q_key.set(data.get("key_path", "") or "")
             self.v_q_engine.set(data.get("engine", "auto"))
+            self.v_q_runtime.set(data.get("runtime", "auto"))
         elif kind == "singbox":
+            self.v_sb_runtime.set(data.get("runtime", "auto"))
             self.txt_sb.delete("1.0", "end")
             self.txt_sb.insert("1.0", json.dumps(data.get("outbound", {}),
                                                  ensure_ascii=False, indent=2))
@@ -607,6 +710,8 @@ class GuiApp:
         self.v_s_rdns.set(True)
         self.v_h_tls.set(False)
         self.v_q_engine.set("auto")
+        self.v_q_runtime.set("auto")
+        self.v_sb_runtime.set("auto")
 
     def _sb_template(self, kind: str) -> None:
         if kind == "ssh":

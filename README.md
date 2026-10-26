@@ -48,7 +48,25 @@ curl --socks5-hostname 127.0.0.1:1081 https://api.ipify.org
 curl -x http://127.0.0.1:1081 https://api.ipify.org
 ```
 
-下面四个分页分别是探测、HTTP 测试、端口转发、本地代理状态。底部是实时日志。
+下面五个分页：探测、HTTP 测试、端口转发、本地代理状态、**内核日志**。底部是实时日志。
+
+## 内核日志
+
+上游是 sing-box 或 SSH（sing-box 引擎）时，内核的 stdout/stderr 会被逐行原样送到「内核日志」页：不做摘录、不做改写，只剥掉 ANSI 颜色码。
+
+```
++0800 2026-10-26 21:32:22 INFO inbound/socks[socks-in]: tcp server started at 127.0.0.1:1310
++0800 2026-10-26 21:32:22 INFO sing-box started (0.38s)
++0800 2026-10-26 21:32:22 INFO [2813636 1ms] outbound/socks[proxy]: outbound connection to api.ipify.org:443
+```
+
+- 第一次有输出时自动切到该页，之后不再抢焦点
+- ERROR/FATAL 标红、WARN 标黄、`sing-box started` 标绿
+- 右上「复制全部」一键拷走，排查问题直接贴
+- `go run` 编译期间内核本身没有输出，会每 5 秒补一行 `[等待] 内核尚未就绪 Ns`（这是我们报的进度，不是内核日志）
+- 上限保留 4000 行，超了从头裁
+
+命令行也能看到同样的原始输出，前缀是 `[内核]`；不想看就设环境变量 `QUIET_KERNEL=1`。
 
 配置写在同目录 `socks5_connector.json`，v1 的老配置能自动识别。
 

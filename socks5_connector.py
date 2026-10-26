@@ -134,8 +134,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _cli_log(level: str, message: str) -> None:
-    """CLI 侧的日志出口：内核 DEBUG 输出默认静音，DEBUG=1 才显示。"""
+    """CLI 侧的日志出口：内核原始行照打，DEBUG 需要 DEBUG=1 才显示。"""
     if level == "DEBUG" and not os.environ.get("DEBUG"):
+        return
+    if level == "KERNEL":
+        if os.environ.get("QUIET_KERNEL"):
+            return
+        print(f"{time.strftime('%H:%M:%S')} [内核] {message}", flush=True)
         return
     print(f"{time.strftime('%H:%M:%S')} [{level}] {message}", flush=True)
 

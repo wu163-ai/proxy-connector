@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import tempfile
@@ -24,6 +25,9 @@ from .common import ProxyError, app_dir, free_port, wait_port
 from .upstream import Socks5Upstream, Upstream
 
 SINGBOX_REPO = "SagerNet/sing-box"
+
+# ANSI 转义序列（sing-box 的日志级别染色）
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
 # --------------------------------------------------------------------------
@@ -271,6 +275,10 @@ class ProcessSocksEngine(Upstream):
                 text=True, encoding="utf-8", errors="replace", creationflags=flags,
             )
             threading.Thread(target=self._pump, args=(proc,), daemon=True).start()
+            # go run 编译期间内核一声不吭，界面会像卡死；这里按秒报等待时长
+            stop_beat = threading.Event()
+            threading.Thread(target=self._heartbeat,
+                             args=(proc, stop_beat), daemon=True).start()
             try:
                 wait_port("127.0.0.1", port, timeout=self.start_timeout,
                           should_stop=lambda: proc.poll() is not None)
@@ -278,6 +286,8 @@ class ProcessSocksEngine(Upstream):
                 detail = " / ".join(self._tail[-4:]) or f"进程退出码 {proc.poll()}"
                 self._kill_tree(proc)
                 raise ProxyError(f"{self._engine_label()} 启动失败: {detail}") from None
+            finally:
+                stop_beat.set()
             self._proc = proc
             self._tmpdir = tmpdir
             self._local = Socks5Upstream("127.0.0.1", port, timeout=self.timeout)
@@ -285,6 +295,16 @@ class ProcessSocksEngine(Upstream):
         except BaseException:
             shutil.rmtree(tmpdir, ignore_errors=True)
             raise
+
+    def _heartbeat(self, proc: subprocess.Popen, stop: threading.Event) -> None:
+        """内核自己不打日志的时候（go run 编译中），把等待秒数如实报出来。"""
+        elapsed = 0
+        while not stop.wait(5):
+            elapsed += 5
+            if proc.poll() is not None:
+                return
+            self._log("INFO", f"[等待] 内核尚未就绪 {elapsed}s"
+                              f"（源码模式编译中，上限 {int(self.start_timeout)}s）")
 
     def _kill_tree(self, proc: subprocess.Popen | None) -> None:
         """结束子进程及其子进程（go run 会再派生子进程，必须整棵树杀）。"""
@@ -316,13 +336,15 @@ class ProcessSocksEngine(Upstream):
         if stream is None:
             return
         for line in stream:
-            line = line.rstrip()
-            if not line:
+            # sing-box 自带 ANSI 颜色码，日志面板里不能直接显示
+            line = _ANSI_RE.sub("", line).rstrip("\r\n")
+            if not line.strip():
                 continue
             self._tail.append(line)
             if len(self._tail) > 40:
                 del self._tail[0]
-            self._log("DEBUG", f"[{self._engine_label()}] {line}")
+            # KERNEL 级别：内核原始输出，界面上单独一页展示，不做任何改写
+            self._log("KERNEL", line)
 
     def connect(self, host: str, port: int, timeout: float | None = None):
         self.start()
