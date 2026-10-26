@@ -11,7 +11,7 @@
 | SOCKS5 | `socks5h://host:1080`<br>`socks5://user:pass@host:1080` | 无 / RFC1929 | 原生实现，最轻。`socks5h` 远程 DNS，`socks5` 本地 DNS |
 | HTTP | `http://user:pass@host:8080`<br>`https://user:pass@host:8443` | Basic | 原生 CONNECT 隧道；`https://` 表示 TLS 连到代理本身 |
 | SSH | `ssh://root@host:22` | 密码 / 私钥 / agent | 密码登录走 sing-box；纯密钥可退回系统 OpenSSH |
-| sing-box | `outbound.json` | 由 outbound 决定 | 支持全部协议：ssh、shadowsocks、vmess、vless、trojan、hysteria2、tuic、anytls、socks、http… |
+| sing-box | `config.json`（完整配置）<br>`outbound.json`（单条出口） | 由配置决定 | 官方配置文件整份吃进去，dns/route/endpoints/experimental 全保留，只替换入站。支持全部协议：shadowsocks、vmess、vless、trojan、hysteria2、tuic、anytls、socks、http、ssh… |
 | 直连 | `direct` | - | 不走代理，用于对照测试 |
 
 ## 快速开始
@@ -26,7 +26,7 @@ python socks5_connector.py
 
 ![界面](gui.png)
 
-顶部选上游类型、填参数、设本地端口，点「连接」。
+顶部选上游类型、填参数，点「连接」。
 
 ## 「连接」到底做了什么
 
@@ -40,6 +40,14 @@ python socks5_connector.py
 点「断开」或直接关窗口：停监听、**把系统代理精确还原**成连接前的值。异常退出也不会留下坏设置——下次启动会检测到备份文件并自动恢复。
 
 不想动系统代理，就取消勾选「接管系统代理」，此时只保留本地端口，自己配到浏览器或软件里。
+
+### 本地端口是什么
+
+是你这台机器上的**入口**，不是代理服务器的端口。浏览器/软件把请求发给 `127.0.0.1:1081`，程序再转给你的代理服务器。
+
+- 勾了「接管系统代理」→ 程序自动把系统代理指到这个端口，你完全不用管它
+- 不勾 → 自己去软件里填 `127.0.0.1:1081`
+- 默认 1081，被别的程序占用会自动顺延到下一个可用端口，实际端口显示在状态栏和「本地代理状态」页
 
 端口同时是 SOCKS5：
 
@@ -131,62 +139,44 @@ python socks5_connector.py install-singbox --proxy socks5h://1.2.3.4:1080
 python socks5_connector.py probe --proxy outbound.json --runtime binary
 ```
 
-### 自定义 outbound
+### sing-box：填框就行，配置程序自己拼
 
-选「sing-box（自定义 outbound）」，粘一条 outbound 进去即可。内核会自动补 inbound、route、direct 出站，并转成本地 SOCKS5。
-
-SSH（密码认证）：
+选「sing-box 配置」，只出现几个输入框：**协议 / 服务器 / 端口 / 用户名（UUID）/ 密码**，另加加密方式、SNI、TLS。填完点「连接」，程序按官方结构自己拼出完整配置：
 
 ```json
 {
-  "type": "ssh",
-  "server": "1.2.3.4",
-  "server_port": 22,
-  "user": "root",
-  "password": "your-password"
+  "log": { "level": "info", "timestamp": true },
+  "inbounds": [{ "type": "socks", "tag": "socks-in", "listen": "127.0.0.1", "listen_port": 1081 }],
+  "outbounds": [
+    { "type": "socks", "tag": "proxy", "server": "1.2.3.4", "server_port": 1080,
+      "version": "5", "username": "u", "password": "p" },
+    { "type": "direct", "tag": "direct" }
+  ],
+  "route": { "final": "proxy" }
 }
 ```
 
-Shadowsocks：
+想核对自己填的东西生成了什么，点「看程序生成的配置」，原样展示、可复制。字段与协议的对应：
 
-```json
-{
-  "type": "shadowsocks",
-  "server": "1.2.3.4",
-  "server_port": 8388,
-  "method": "aes-128-gcm",
-  "password": "your-password"
-}
-```
+| 协议 | 用户名框填 | 密码框填 | 其他 |
+|---|---|---|---|
+| socks / http | 用户名（可空） | 密码 | http 勾 TLS 表示 https 代理 |
+| shadowsocks | 留空 | 密码 | 加密方式必填，如 `aes-128-gcm` |
+| vmess / vless | **UUID** | 留空 | TLS 勾上；SNI 留空用服务器地址 |
+| trojan / hysteria2 | 留空 | 密码 | TLS 自动开启 |
+| ssh | 用户名 | 密码 | - |
 
-Trojan：
+启动前先跑 `sing-box check`，报错原文进日志；`route.final` 指向不存在的 tag 会提前给出中文提示。
 
-```json
-{
-  "type": "trojan",
-  "server": "example.com",
-  "server_port": 443,
-  "password": "your-password",
-  "tls": { "enabled": true, "server_name": "example.com" }
-}
-```
+### 直接给完整配置文件（命令行 / 老配置）
 
-Hysteria2：
-
-```json
-{
-  "type": "hysteria2",
-  "server": "example.com",
-  "server_port": 443,
-  "password": "your-password"
-}
-```
-
-也可以直接把完整的 sing-box 配置文件（含 `outbounds`）丢给 `--proxy`，程序会取第一个 outbound：
+程序内部同样支持整份 config.json（`$schema` / `log` / `dns` / `inbounds` / `outbounds` / `route` / `endpoints` / `experimental` 全套），规则是：**只把 `inbounds` 换成自己的本地 socks 入口，并沿用你第一个 inbound 的 tag**，`dns`、`route.rules`、`endpoints`、`experimental` 原样保留。
 
 ```bash
 python socks5_connector.py probe --proxy config.json --target www.google.com:443 --tls
 ```
+
+`--proxy` 会自己判断是完整配置还是单条 outbound（`{"type": "shadowsocks", ...}` 这种也吃）。
 
 ## SSH 的两种引擎
 
@@ -223,7 +213,7 @@ socks5_connector.py      入口 + CLI（gui / web / probe / fetch / tunnel / pro
 connector/
   common.py              异常、地址解析、端口等待
   upstream.py            Upstream 抽象 + SOCKS5 / HTTP / 直连实现 + 从字符串/字典构造
-  engines.py             sing-box（go run 源码 / 可执行文件）与 OpenSSH 子进程引擎
+  engines.py             sing-box（完整配置 / 单条出口，go run 源码或可执行文件）与 OpenSSH 子进程引擎
   nethttp.py             基于任意上游的 HTTP 客户端、探测、流式下载
   forward.py             TCP 端口转发、HTTP 代理处理逻辑
   localproxy.py          本地混合代理入站（SOCKS5 + HTTP 同端口）——「连接」的核心

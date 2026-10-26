@@ -361,9 +361,10 @@ class DirectUpstream(Upstream):
 def parse_upstream(spec: str, **options) -> Upstream:
     """把 'socks5h://user:pass@host:19181' / 'http://...' / 'ssh://...' 变成上游对象。
 
-    也接受 .json 文件路径（视为 sing-box outbound 配置）。
+    也接受 .json 文件路径：完整 sing-box 配置或单条 outbound 都行。
     """
-    from .engines import SingBoxUpstream, SshUpstream, find_singbox_binary
+    from .engines import (SingBoxConfigUpstream, SingBoxUpstream, SshUpstream,
+                          find_singbox_binary, look_like_singbox_config)
 
     raw = (spec or "").strip()
     if not raw:
@@ -375,13 +376,20 @@ def parse_upstream(spec: str, **options) -> Upstream:
 
         with open(raw, "r", encoding="utf-8") as fh:
             data = _json.load(fh)
-        if isinstance(data, dict) and "outbounds" in data:
+        if not isinstance(data, dict):
+            raise ValueError("sing-box 配置文件必须是一个 JSON 对象")
+        common = dict(binary=options.get("binary"), log=options.get("log"),
+                      source=options.get("source"), go=options.get("go"),
+                      runtime=options.get("runtime") or "auto")
+        if look_like_singbox_config(data) and (
+                "outbounds" in data or "inbounds" in data or "route" in data
+                or "dns" in data or "$schema" in data):
+            return SingBoxConfigUpstream(data, **common)
+        if "outbounds" in data:
             data = data["outbounds"][0]
         if not isinstance(data, dict) or "type" not in data:
             raise ValueError("sing-box 配置文件里没找到合法的 outbound")
-        return SingBoxUpstream(data, binary=options.get("binary"), log=options.get("log"),
-                               source=options.get("source"), go=options.get("go"),
-                               runtime=options.get("runtime") or "auto")
+        return SingBoxUpstream(data, **common)
 
     lower = raw.lower()
     timeout = float(options.get("timeout") or 15.0)
@@ -472,12 +480,18 @@ def upstream_from_dict(data: dict, log=None, binary=None) -> Upstream:
             log=log,
         )
     if kind == "singbox":
+        from .engines import SingBoxConfigUpstream
+        common = dict(binary=binary, log=log,
+                      source=data.get("source") or None,
+                      go=data.get("go") or None,
+                      runtime=data.get("runtime") or "auto",
+                      timeout=float(data.get("timeout") or 20.0))
+        config = data.get("config")
+        if isinstance(config, dict) and config:
+            return SingBoxConfigUpstream(config, **common)
         outbound = data.get("outbound") or {}
         if not isinstance(outbound, dict) or "type" not in outbound:
-            raise ValueError("sing-box 引擎缺少合法的 outbound 配置")
-        return SingBoxUpstream(outbound, binary=binary, log=log,
-                               source=data.get("source") or None,
-                               go=data.get("go") or None,
-                               runtime=data.get("runtime") or "auto",
-                               timeout=float(data.get("timeout") or 20.0))
+            raise ValueError("sing-box 引擎缺少合法的配置：需要 config（完整配置）"
+                             "或 outbound（单条出口）")
+        return SingBoxUpstream(outbound, **common)
     raise ValueError(f"未知的上游类型: {kind}")

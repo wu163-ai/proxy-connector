@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import platform
@@ -241,6 +242,10 @@ class ProcessSocksEngine(Upstream):
     def _files(self, listen_port: int) -> dict[str, str]:
         return {}
 
+    def _preflight(self, workdir: str) -> None:
+        """启动前的配置校验钩子，默认什么都不做。"""
+        return
+
     def _env(self) -> dict | None:
         return None
 
@@ -266,6 +271,7 @@ class ProcessSocksEngine(Upstream):
                 with open(os.path.join(tmpdir, name), "w", encoding="utf-8") as fh:
                     fh.write(content)
             cmd, cwd = self._command(port, tmpdir)
+            self._preflight(tmpdir)   # sing-box: 先 check，配置错就直接报原文
             flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
             self._tail = []
             self._log("INFO", f"启动内核 {self._engine_label()}{self._startup_hint()} ...")
@@ -533,6 +539,158 @@ class SingBoxUpstream(ProcessSocksEngine):
         env.setdefault("CGO_ENABLED", "0")
         env["GOFLAGS"] = env.get("GOFLAGS", "")
         return env
+
+    # ---- 配置校验 ----
+    def _preflight(self, workdir: str) -> None:
+        """启动前跑 `sing-box check`，把配置错误在界面上直接说清楚。"""
+        binary = find_singbox_binary(self.binary)
+        if not binary:
+            return
+        config_path = os.path.join(os.path.abspath(workdir), "config.json")
+        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        try:
+            proc = subprocess.run([binary, "check", "-c", config_path],
+                                  capture_output=True, text=True, timeout=90,
+                                  stdin=subprocess.DEVNULL, creationflags=flags)
+        except (OSError, subprocess.SubprocessError):
+            return
+        output = ((proc.stderr or "") + (proc.stdout or "")).strip()
+        if proc.returncode != 0:
+            raise ProxyError("配置校验失败（sing-box check）:\n" + (output[-1500:] or
+                                                                    "无输出"))
+        self._log("OK", "sing-box check 通过")
+
+
+# --------------------------------------------------------------------------
+# 完整 sing-box 配置（config.json）
+# --------------------------------------------------------------------------
+
+class SingBoxConfigUpstream(SingBoxUpstream):
+    """直接吃一份完整的 sing-box 配置文件。
+
+    原则：用户写的什么就保留什么 —— dns、route 规则、endpoints、experimental、
+    services 一律不动，只把自己的 inbounds 换成我们的本地 socks 入口，
+    并且沿用原来第一个 inbound 的 tag，这样 route 里按 inbound 匹配的规则依然成立。
+    """
+
+    kind = "singbox-config"
+
+    def __init__(self, config: dict, binary: str | None = None,
+                 source: str | None = None, go: str | None = None,
+                 runtime: str = "auto", timeout: float = 20.0, log=None):
+        if not isinstance(config, dict) or not config:
+            raise ValueError("sing-box 配置必须是一个 JSON 对象")
+        if not look_like_singbox_config(config):
+            raise ValueError("这不像 sing-box 配置：至少要有 outbounds / route / inbounds 之一，"
+                             "或者是单条 outbound（含 type 与 server）")
+        self.config = copy.deepcopy(config)
+        primary = self._primary_outbound(self.config)
+        super().__init__(primary, binary=binary, source=source, go=go,
+                         runtime=runtime, timeout=timeout, log=log)
+
+    # ---- 推断主出口 ----
+    @staticmethod
+    def _primary_outbound(config: dict) -> dict:
+        outbounds = [o for o in (config.get("outbounds") or []) if isinstance(o, dict)]
+        route = config.get("route") if isinstance(config.get("route"), dict) else {}
+        final = route.get("final")
+        by_tag = {o.get("tag"): o for o in outbounds if o.get("tag")}
+        if final and final in by_tag:
+            return dict(by_tag[final])
+        for item in outbounds:
+            if item.get("type") not in ("direct", "block", "dns"):
+                return dict(item)
+        if outbounds:
+            return dict(outbounds[0])
+        return {"type": "direct", "tag": "direct"}
+
+    # ---- 展示 ----
+    def _engine_label(self) -> str:
+        proto = self.outbound.get("type")
+        base = f"sing-box/配置({proto})"
+        return base + (" (go run)" if self._mode == "source" else "")
+
+    def describe(self) -> str:
+        tag = self.outbound.get("tag") or "?"
+        proto = self.outbound.get("type") or "?"
+        return f"singbox-config://{tag}/{proto}"
+
+    def to_dict(self) -> dict:
+        data = {"type": "singbox", "config": self.config, "timeout": self.timeout}
+        if self.runtime != "auto":
+            data["runtime"] = self.runtime
+        if self.source:
+            data["source"] = self.source
+        return data
+
+    # ---- 组配置 ----
+    def build_config(self, listen_port: int) -> dict:
+        cfg = copy.deepcopy(self.config)
+
+        inbounds = cfg.get("inbounds") or []
+        tag = "mixed-in"
+        if inbounds and isinstance(inbounds[0], dict) and inbounds[0].get("tag"):
+            tag = str(inbounds[0]["tag"])
+        self.inbound_tag = tag
+        # 我们只借它的 tag 保留 route 匹配关系，监听地址必须是我们的本地端口
+        cfg["inbounds"] = [{
+            "type": "socks",
+            "tag": tag,
+            "listen": "127.0.0.1",
+            "listen_port": listen_port,
+        }]
+
+        outbounds = [dict(o) for o in (cfg.get("outbounds") or []) if isinstance(o, dict)]
+        tags = {o.get("tag") for o in outbounds if o.get("tag")}
+        if "direct" not in tags:
+            outbounds.append({"type": "direct", "tag": "direct"})
+            tags.add("direct")
+        cfg["outbounds"] = outbounds
+
+        route = cfg.get("route") if isinstance(cfg.get("route"), dict) else {}
+        if not route.get("final"):
+            pick = self.outbound.get("tag")
+            route["final"] = pick if pick in tags else next(
+                (t for t in tags if t not in ("direct", "block")), "direct")
+        cfg["route"] = route
+
+        # sing-box check 不校验 tag 引用，这里提前拦住，省得报难懂的 FATAL
+        known = sorted(t for t in tags if t)
+        final = route.get("final")
+        if final and final not in tags:
+            raise ProxyError(
+                f"route.final 指向 '{final}'，但 outbounds 里没有这个 tag。"
+                f"现有出口: {', '.join(known) or '无'}")
+        for index, rule in enumerate(route.get("rules") or []):
+            if not isinstance(rule, dict):
+                continue
+            target = rule.get("outbound")
+            if isinstance(target, str) and target not in tags:
+                raise ProxyError(
+                    f"route.rules[{index}] 指向 '{target}'，但 outbounds 里没有这个 tag。"
+                    f"现有出口: {', '.join(known) or '无'}")
+
+        log = cfg.get("log") if isinstance(cfg.get("log"), dict) else {}
+        log.setdefault("level", "info")
+        log.setdefault("timestamp", True)
+        cfg["log"] = log
+        return cfg
+
+    def _startup_hint(self) -> str:
+        return "，按完整配置文件启动" + (
+            "（go run 源码，首次编译几分钟）" if self._mode == "source" else "")
+
+
+def look_like_singbox_config(data: dict) -> bool:
+    """判断一份 JSON 是完整配置还是单条 outbound。"""
+    if not isinstance(data, dict):
+        return False
+    full_keys = ("inbounds", "outbounds", "route", "dns", "endpoints",
+                 "experimental", "services", "log", "$schema", "certificate")
+    if any(key in data for key in full_keys):
+        return True
+    # 单条 outbound：有 type 且带 server / server_port
+    return "type" in data and ("server" in data or "server_port" in data)
 
 
 # --------------------------------------------------------------------------

@@ -33,19 +33,15 @@ TYPE_LABELS = [
     ("socks5", "SOCKS5"),
     ("http", "HTTP 代理"),
     ("ssh", "SSH"),
-    ("singbox", "sing-box 自定义"),
+    ("singbox", "sing-box 配置"),
     ("direct", "直连"),
 ]
 KIND_TO_LABEL = {kind: label for kind, label in TYPE_LABELS}
 LABEL_TO_KIND = {label: kind for kind, label in TYPE_LABELS}
 
-DEFAULT_SINGBOX_JSON = json.dumps({
-    "type": "ssh",
-    "server": "1.2.3.4",
-    "server_port": 22,
-    "user": "root",
-    "password": "your-password",
-}, ensure_ascii=False, indent=2)
+# sing-box 表单支持的协议（配置由程序拼，见 _build_singbox_outbound）
+SINGBOX_PROTOCOLS = ["socks", "http", "shadowsocks", "vmess", "vless",
+                     "trojan", "hysteria2", "ssh"]
 
 LOG_COLORS = {
     "DEBUG": "#94a3b8",
@@ -156,10 +152,6 @@ class GuiApp:
         ttk.Spinbox(top, from_=1, to=600, textvariable=self.timeout_var,
                     width=6).pack(side="left", padx=(6, 18))
 
-        ttk.Label(top, text="本地端口").pack(side="left")
-        self.local_port_var = tk.StringVar(value="1081")
-        ttk.Spinbox(top, from_=1, to=65535, textvariable=self.local_port_var,
-                    width=7).pack(side="left", padx=(6, 12))
         self.use_system_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(top, text="接管系统代理", variable=self.use_system_var).pack(side="left")
 
@@ -252,28 +244,61 @@ class GuiApp:
         return frame
 
     def _frame_singbox(self, parent: ttk.Frame) -> ttk.Frame:
+        """只填服务器/端口/账号密码，配置由程序生成，不用碰 JSON。"""
         frame = ttk.Frame(parent)
         frame.columnconfigure(0, weight=1)
-        frame.rowconfigure(1, weight=1)
-        ttk.Label(frame, text="sing-box outbound（单条 JSON）").grid(row=0, column=0, sticky="w")
-        self.txt_sb = tk.Text(frame, height=7, wrap="none", font=MONO, undo=True)
-        self.txt_sb.grid(row=1, column=0, sticky="nsew", pady=(4, 6))
-        self.txt_sb.insert("1.0", DEFAULT_SINGBOX_JSON)
+
+        head = ttk.Frame(frame)
+        head.grid(row=0, column=0, sticky="ew")
+        ttk.Label(head, text="协议").pack(side="left")
+        self.v_sb_proto = tk.StringVar(value="socks")
+        self.cb_sb_proto = ttk.Combobox(head, textvariable=self.v_sb_proto, state="readonly",
+                                       width=13, values=SINGBOX_PROTOCOLS)
+        self.cb_sb_proto.pack(side="left", padx=(6, 14))
+        self.cb_sb_proto.bind("<<ComboboxSelected>>", lambda _e: self._sync_singbox_fields())
+
+        self.v_sb_host = tk.StringVar()
+        self.v_sb_port = tk.StringVar()
+        self.v_sb_user = tk.StringVar()
+        self.v_sb_pass = tk.StringVar()
+        self.v_sb_method = tk.StringVar(value="aes-128-gcm")
+        self.v_sb_sni = tk.StringVar()
+        self.v_sb_tls = tk.BooleanVar(value=False)
+
+        self._row(frame, [("服务器", self.v_sb_host, 24), ("端口", self.v_sb_port, 8),
+                          ("用户名 / UUID", self.v_sb_user, 18),
+                          ("密码", self.v_sb_pass, 16, True)], row=1)
+        self._row(frame, [("加密方式（仅 shadowsocks）", self.v_sb_method, 20),
+                          ("SNI / 服务器名称（可空）", self.v_sb_sni, 22)], row=2)
+
         bar = ttk.Frame(frame)
-        bar.grid(row=2, column=0, sticky="w")
-        ttk.Button(bar, text="SSH 模板",
-                   command=lambda: self._sb_template("ssh")).pack(side="left")
-        ttk.Button(bar, text="SOCKS 模板",
-                   command=lambda: self._sb_template("socks")).pack(side="left", padx=6)
-        ttk.Label(bar, text="运行时").pack(side="left", padx=(16, 0))
+        bar.grid(row=3, column=0, sticky="w")
+        ttk.Checkbutton(bar, text="TLS", variable=self.v_sb_tls).pack(side="left")
+        ttk.Button(bar, text="看程序生成的配置",
+                   command=self._preview_singbox).pack(side="left", padx=(14, 0))
+        ttk.Label(bar, text="运行时").pack(side="left", padx=(14, 0))
         self.v_sb_runtime = tk.StringVar(value="auto")
         ttk.Combobox(bar, textvariable=self.v_sb_runtime, state="readonly", width=9,
                      values=["auto", "source", "binary"]).pack(side="left", padx=6)
-        ttk.Label(bar, text="source=go run 源码 / binary=bin/sing-box.exe",
-                  style="Hint.TLabel").pack(side="left", padx=4)
-        ttk.Label(bar, text="支持 ss / vmess / vless / trojan / hysteria2 / tuic / anytls …",
-                  style="Hint.TLabel").pack(side="left", padx=8)
+        self.lbl_sb_hint = ttk.Label(frame, text="", style="Hint.TLabel")
+        self.lbl_sb_hint.grid(row=4, column=0, sticky="w", pady=(6, 0))
+        self._sync_singbox_fields()
         return frame
+
+    def _sync_singbox_fields(self) -> None:
+        """按协议提示该填什么，别让人填没用的框。"""
+        proto = self.v_sb_proto.get()
+        hint = {
+            "socks": "只填服务器和端口；要认证再填用户名/密码。",
+            "http": "HTTP 代理，要认证填用户名/密码；代理本身是 https 就勾 TLS。",
+            "shadowsocks": "加密方式和密码必填，用户名留空。",
+            "vmess": "用户名填 UUID，密码留空；SNI 留空则用服务器地址。",
+            "vless": "用户名填 UUID，密码留空；SNI 留空则用服务器地址。",
+            "trojan": "密码必填，TLS 自动开启；SNI 留空则用服务器地址。",
+            "hysteria2": "密码必填，TLS 自动开启；SNI 留空则用服务器地址。",
+            "ssh": "填用户名和密码。密码登录依赖 sing-box 的 ssh 出站。",
+        }.get(proto, "")
+        self.lbl_sb_hint.configure(text=hint)
 
     def _frame_direct(self, parent: ttk.Frame) -> ttk.Frame:
         frame = ttk.Frame(parent)
@@ -385,18 +410,28 @@ class GuiApp:
         page = ttk.Frame(self.nb, padding=10)
         self.nb.add(page, text="  本地代理状态  ")
         page.columnconfigure(0, weight=1)
-        page.rowconfigure(1, weight=1)
+        page.rowconfigure(2, weight=1)
+
+        bar = ttk.Frame(page)
+        bar.grid(row=0, column=0, sticky="ew")
+        ttk.Label(bar, text="本地监听端口").pack(side="left")
+        self.local_port_var = tk.StringVar(value="1081")
+        ttk.Spinbox(bar, from_=1024, to=65535, textvariable=self.local_port_var,
+                    width=8).pack(side="left", padx=6)
+        ttk.Label(bar, text="浏览器和软件就指这个端口；被占用会自动顺延，改完点「连接」生效",
+                  style="Hint.TLabel").pack(side="left", padx=(6, 0))
 
         self.lbl_hp = ttk.Label(page, text="未连接", style="Hint.TLabel")
-        self.lbl_hp.grid(row=0, column=0, sticky="w")
+        self.lbl_hp.grid(row=1, column=0, sticky="w", pady=(8, 0))
 
         wrap, self.txt_hp = self._text_panel(page)
-        wrap.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
+        wrap.grid(row=2, column=0, sticky="nsew", pady=(8, 0))
         self._write(self.txt_hp,
                     "点上方「连接」后，本机会监听一个混合端口，同时支持：\n"
                     "  · HTTP/HTTPS 代理（浏览器、系统代理、只认 HTTP 代理的软件）\n"
                     "  · SOCKS5（支持 socks5 的软件、curl --socks5-hostname）\n"
-                    "地址形如 127.0.0.1:1081，端口可在上方「本地端口」修改。\n")
+                    "这个端口是给本机程序用的入口，不是你的代理服务器端口。\n"
+                    "勾了「接管系统代理」的话，程序会自动把系统代理指过来，你不用管它。\n")
 
     def _build_kernel_page(self) -> None:
         """sing-box / ssh 内核的原始输出，一行不改，原样展示。"""
@@ -434,6 +469,7 @@ class GuiApp:
         self.txt_kernel.tag_configure("dim", foreground="#94a3b8")
         self._kernel_lines = 0
         self._kernel_switched = False
+        self._kernel_placeholder = True
         self._write(self.txt_kernel, "等你点「连接」并且上游是 sing-box / SSH 时，"
                                      "这里会滚动显示内核的真实 stdout/stderr。\n")
 
@@ -509,6 +545,9 @@ class GuiApp:
 
         text = self.txt_kernel
         text.configure(state="normal")
+        if self._kernel_placeholder:
+            text.delete("1.0", "end")   # 第一条真实日志来了，把占位提示清掉
+            self._kernel_placeholder = False
         text.insert("end", message + "\n", tag)
         self._kernel_lines += 1
         if self._kernel_lines > 4000:
@@ -528,6 +567,7 @@ class GuiApp:
         self.txt_kernel.delete("1.0", "end")
         self.txt_kernel.configure(state="disabled")
         self._kernel_lines = 0
+        self._kernel_placeholder = False
         self.lbl_kernel.configure(text="内核日志已清空")
 
     def _copy_kernel(self) -> None:
@@ -652,16 +692,7 @@ class GuiApp:
                 "runtime": self.v_q_runtime.get() or "auto",
             })
         elif kind == "singbox":
-            raw = self.txt_sb.get("1.0", "end").strip()
-            if not raw:
-                raise ValueError("请填写 sing-box outbound JSON")
-            try:
-                outbound = json.loads(raw)
-            except ValueError as exc:
-                raise ValueError(f"JSON 解析失败: {exc}") from exc
-            if not isinstance(outbound, dict) or "type" not in outbound:
-                raise ValueError("outbound 必须是含 type 字段的对象")
-            payload["outbound"] = outbound
+            payload["outbound"] = self._build_singbox_outbound()
             payload["runtime"] = self.v_sb_runtime.get() or "auto"
         return payload
 
@@ -693,9 +724,30 @@ class GuiApp:
             self.v_q_runtime.set(data.get("runtime", "auto"))
         elif kind == "singbox":
             self.v_sb_runtime.set(data.get("runtime", "auto"))
-            self.txt_sb.delete("1.0", "end")
-            self.txt_sb.insert("1.0", json.dumps(data.get("outbound", {}),
-                                                 ensure_ascii=False, indent=2))
+            ob: dict = {}
+            if isinstance(data.get("outbound"), dict):
+                ob = data["outbound"]
+            elif isinstance(data.get("config"), dict):
+                cfg = data["config"]
+                outs = [o for o in (cfg.get("outbounds") or []) if isinstance(o, dict)]
+                route = cfg.get("route") if isinstance(cfg.get("route"), dict) else {}
+                by_tag = {o.get("tag"): o for o in outs if o.get("tag")}
+                ob = by_tag.get(route.get("final")) or next(
+                    (o for o in outs if o.get("type") not in ("direct", "block")), {})
+            if ob:
+                proto = ob.get("type") or "socks"
+                if proto in SINGBOX_PROTOCOLS:
+                    self.v_sb_proto.set(proto)
+                self.v_sb_host.set(str(ob.get("server") or ""))
+                self.v_sb_port.set(str(ob.get("server_port") or ""))
+                self.v_sb_user.set(str(ob.get("uuid") or ob.get("username")
+                                      or ob.get("user") or ""))
+                self.v_sb_pass.set(str(ob.get("password") or ""))
+                self.v_sb_method.set(str(ob.get("method") or "aes-128-gcm"))
+                tls = ob.get("tls") if isinstance(ob.get("tls"), dict) else {}
+                self.v_sb_sni.set(str(tls.get("server_name") or ""))
+                self.v_sb_tls.set(bool(tls.get("enabled")))
+            self._sync_singbox_fields()
 
     def _clear_form(self) -> None:
         """没有任何配置时，把表单留空，不塞占位地址。"""
@@ -713,15 +765,116 @@ class GuiApp:
         self.v_q_runtime.set("auto")
         self.v_sb_runtime.set("auto")
 
-    def _sb_template(self, kind: str) -> None:
-        if kind == "ssh":
-            data = {"type": "ssh", "server": "1.2.3.4", "server_port": 22,
-                    "user": "root", "password": "your-password"}
+    def _build_singbox_outbound(self) -> dict:
+        """把几个输入框拼成 sing-box 的一条 outbound，不用人写 JSON。"""
+        proto = self.v_sb_proto.get() or "socks"
+        host = self.v_sb_host.get().strip()
+        if not host:
+            raise ValueError("请填写服务器地址")
+        try:
+            port = int(self.v_sb_port.get().strip() or "0")
+        except (TypeError, ValueError):
+            raise ValueError("端口必须是数字") from None
+        if not 0 < port < 65536:
+            raise ValueError("端口无效（1-65535）")
+
+        user = self.v_sb_user.get().strip()
+        pwd = self.v_sb_pass.get()
+        method = self.v_sb_method.get().strip()
+        sni = self.v_sb_sni.get().strip() or host
+        tls = bool(self.v_sb_tls.get())
+
+        ob: dict = {"type": proto, "tag": "proxy", "server": host, "server_port": port}
+        if proto == "socks":
+            ob["version"] = "5"
+            if user:
+                ob["username"] = user
+                ob["password"] = pwd
+        elif proto == "http":
+            if user:
+                ob["username"] = user
+                ob["password"] = pwd
+            if tls:
+                ob["tls"] = {"enabled": True, "server_name": sni}
+        elif proto == "shadowsocks":
+            if not method:
+                raise ValueError("shadowsocks 必须填加密方式，例如 aes-128-gcm")
+            ob["method"] = method
+            ob["password"] = pwd
+        elif proto in ("vmess", "vless"):
+            if not user:
+                raise ValueError(f"{proto} 必须填 UUID（在「用户名 / UUID」框）")
+            ob["uuid"] = user
+            if tls:
+                ob["tls"] = {"enabled": True, "server_name": sni}
+        elif proto == "trojan":
+            if not pwd:
+                raise ValueError("trojan 必须填密码")
+            ob["password"] = pwd
+            ob["tls"] = {"enabled": True, "server_name": sni}
+        elif proto == "hysteria2":
+            if not pwd:
+                raise ValueError("hysteria2 必须填密码")
+            ob["password"] = pwd
+            ob["tls"] = {"enabled": True, "server_name": sni}
+        elif proto == "ssh":
+            ob["user"] = user or "root"
+            if pwd:
+                ob["password"] = pwd
         else:
-            data = {"type": "socks", "server": "1.2.3.4", "server_port": 1080,
-                    "version": "5", "username": "user", "password": "pass"}
-        self.txt_sb.delete("1.0", "end")
-        self.txt_sb.insert("1.0", json.dumps(data, ensure_ascii=False, indent=2))
+            raise ValueError(f"不支持的协议: {proto}")
+        return ob
+
+    def _preview_singbox(self) -> None:
+        """把程序真正会交给 sing-box 的配置原样展示出来。"""
+        try:
+            payload = self._collect_config()
+            upstream = upstream_from_dict(payload, log=self.log)
+            cfg = upstream.build_config(self._local_port())
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror("配置有误", str(exc))
+            return
+        body = json.dumps(cfg, ensure_ascii=False, indent=2)
+
+        win = tk.Toplevel(self.root)
+        win.title("程序生成的 sing-box 配置")
+        win.geometry("760x600")
+        win.transient(self.root)
+        hint = ttk.Label(win, text="inbounds 是本地监听（端口在连接时确定），"
+                                   "route.final 指向你填的那条出口。",
+                         style="Hint.TLabel")
+        hint.pack(anchor="w", padx=10, pady=(8, 4))
+        wrap = ttk.Frame(win)
+        wrap.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        text = tk.Text(wrap, font=MONO, wrap="none", bg="#0b1220", fg="#cbd5e1",
+                       relief="flat", padx=8, pady=6)
+        scroll = ttk.Scrollbar(wrap, orient="vertical", command=text.yview)
+        text.configure(yscrollcommand=scroll.set)
+        text.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        text.insert("1.0", body)
+        text.configure(state="disabled")
+
+    def _clear_form(self) -> None:
+        """没有任何配置时，把表单留空，不塞占位地址。"""
+        self.type_var.set(KIND_TO_LABEL["socks5"])
+        self._switch_fields()
+        self.timeout_var.set("20")
+        for var in (self.v_s_host, self.v_s_port, self.v_s_user, self.v_s_pass,
+                    self.v_h_host, self.v_h_port, self.v_h_user, self.v_h_pass,
+                    self.v_q_host, self.v_q_port, self.v_q_user, self.v_q_pass,
+                    self.v_q_key, self.v_sb_host, self.v_sb_port, self.v_sb_user,
+                    self.v_sb_pass, self.v_sb_sni):
+            var.set("")
+        self.v_s_rdns.set(True)
+        self.v_h_tls.set(False)
+        self.v_q_engine.set("auto")
+        self.v_q_runtime.set("auto")
+        self.v_sb_runtime.set("auto")
+        self.v_sb_proto.set("socks")
+        self.v_sb_method.set("aes-128-gcm")
+        self.v_sb_tls.set(False)
+        self._sync_singbox_fields()
 
     # ------------------------------------------------------------------
     # 状态 / 异步
@@ -796,14 +949,28 @@ class GuiApp:
         self.use_system = bool(self.use_system_var.get())
         self._save_config()
 
-        proxy = MixedProxy(new_upstream, "127.0.0.1", port, self.log)
-        try:
-            proxy.start()
-        except Exception as exc:  # noqa: BLE001
+        proxy = None
+        last_error = None
+        # 端口被占用就顺延，别让人为了端口冲突去改配置
+        for candidate in range(port, min(port + 12, 65536)):
+            attempt = MixedProxy(new_upstream, "127.0.0.1", candidate, self.log)
+            try:
+                attempt.start()
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                if "绑定失败" not in str(exc):
+                    break
+                continue
+            proxy = attempt
+            if candidate != port:
+                self.log("WARN", f"本地端口 {port} 被占用，已自动改用 {candidate}")
+            break
+        if proxy is None:
             self._connected = False
             self._update_status()
-            messagebox.showerror("连接失败", str(exc))
+            messagebox.showerror("连接失败", str(last_error or "本地端口不可用"))
             return
+        self.local_port_var.set(str(proxy.port))
         self.proxy = proxy
         self._connected = True
         self.btn_connect.configure(state="disabled")
