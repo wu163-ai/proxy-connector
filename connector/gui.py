@@ -68,6 +68,8 @@ class GuiApp:
     def __init__(self, config_path: str | None = None, upstream: Upstream | None = None):
         _enable_dpi_awareness()
         self.config_path = config_path
+        # 命令行显式给的上游：即使没有配置文件也要填进表单，不能被当成"空配置"清掉
+        self._explicit_upstream = upstream is not None
         self.upstream: Upstream = upstream or Socks5Upstream("127.0.0.1", 1080)
         self.tunnel: TcpTunnel | None = None
         self.proxy: MixedProxy | None = None
@@ -98,6 +100,11 @@ class GuiApp:
         self._build()
         if self._load_config():
             self._fill_form(self.upstream)
+        elif self._explicit_upstream:
+            # 命令行 --proxy 传进来的，直接填上并视为可用
+            self._fill_form(self.upstream)
+            self._has_upstream = True
+            self.log("INFO", f"已载入命令行指定的上游 {self.upstream.describe()}")
         else:
             self._clear_form()
         self.local_port_var.set(str(self.local_port))
@@ -721,22 +728,6 @@ class GuiApp:
                 self.v_sb_tls.set(bool(tls.get("enabled")))
             self._sync_singbox_fields()
 
-    def _clear_form(self) -> None:
-        """没有任何配置时，把表单留空，不塞占位地址。"""
-        self.type_var.set(KIND_TO_LABEL["socks5"])
-        self._switch_fields()
-        self.timeout_var.set("20")
-        for var in (self.v_s_host, self.v_s_port, self.v_s_user, self.v_s_pass,
-                    self.v_h_host, self.v_h_port, self.v_h_user, self.v_h_pass,
-                    self.v_q_host, self.v_q_port, self.v_q_user, self.v_q_pass,
-                    self.v_q_key):
-            var.set("")
-        self.v_s_rdns.set(True)
-        self.v_h_tls.set(False)
-        self.v_q_engine.set("auto")
-        self.v_q_runtime.set("auto")
-        self.v_sb_runtime.set("auto")
-
     def _build_singbox_outbound(self) -> dict:
         """把几个输入框拼成 sing-box 的一条 outbound，不用人写 JSON。"""
         proto = self.v_sb_proto.get() or "socks"
@@ -920,6 +911,23 @@ class GuiApp:
         self._has_upstream = True
         self.use_system = bool(self.use_system_var.get())
         self._save_config()
+
+        # 先确认上游本体通不通。上游挂了还去接管系统代理，等于把浏览器搞死，
+        # 而且报错会变成一堆看不懂的 socks 错误码。
+        where = new_upstream.server_address()
+        if where:
+            self.status_label.configure(text=f"正在检查上游 {where} …")
+            self.root.update_idletasks()
+            fail = new_upstream.precheck(timeout=4.0)
+            if fail:
+                self._connected = False
+                self._stop_proxy()
+                self.sysproxy.disable()
+                self._update_status()
+                self.log("ERROR", fail)
+                messagebox.showerror("上游不可达", fail + "\n\n未接管系统代理，网络保持原样。")
+                return
+            self.log("OK", f"上游 {where} 可达")
 
         proxy = None
         last_error = None

@@ -256,7 +256,10 @@ class HttpProxyServer:
             bridge(client, remote)
             remote = None
         except Exception as exc:  # noqa: BLE001
-            self._log("ERROR", f"[HTTP代理] {addr[0]}:{addr[1]} 失败: {exc}")
+            # addr 是客户端来的临时端口，写进日志会让人以为 2096 是本地代理端口
+            tgt_host = locals().get("host") or addr[0]
+            tgt_port = locals().get("port") or addr[1]
+            self._log("ERROR", f"[HTTP代理] -> {tgt_host}:{tgt_port} 失败: {exc}")
             try:
                 client.sendall(b"HTTP/1.1 502 Bad Gateway\r\n"
                                b"Content-Type: text/plain; charset=utf-8\r\n"

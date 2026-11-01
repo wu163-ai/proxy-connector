@@ -16,6 +16,7 @@ import os
 import socket
 import ssl
 import struct
+import time
 
 from .common import ProxyError, recv_exact, split_host_port
 
@@ -61,6 +62,41 @@ class Upstream:
 
     def stop(self) -> None:
         return None
+
+    def server_address(self) -> str:
+        """上游代理服务器本身在哪（host:port）。用于连通性预检，空表示无法判断。"""
+        return ""
+
+    def precheck(self, timeout: float = 4.0) -> str:
+        """连接前先看上游代理本体通不通。
+
+        返回空串表示没问题；返回非空字符串是给人看的失败原因。
+        目的是别等内核拉起来、发完 CONNECT 才回来一句含糊的 socks 错误码。
+        """
+        where = self.server_address()
+        if not where:
+            return ""
+        host, _, port_text = where.rpartition(":")
+        host = host.strip("[]")
+        try:
+            port = int(port_text)
+        except ValueError:
+            return ""
+        start = time.perf_counter()
+        try:
+            sock = socket.create_connection((host, port), timeout=timeout)
+        except socket.timeout:
+            elapsed = time.perf_counter() - start
+            return (f"上游代理 {where} 无响应（{elapsed:.1f} 秒超时）。"
+                    f"确认代理服务在运行、端口没被防火墙拦、IP 没变")
+        except OSError as exc:
+            return (f"上游代理 {where} 连不上：{exc.strerror or exc}。"
+                    f"确认服务在运行、端口写对了")
+        try:
+            sock.close()
+        except OSError:
+            pass
+        return ""
 
     @property
     def running(self) -> bool:
@@ -146,6 +182,9 @@ class Socks5Upstream(Upstream):
         scheme = "socks5h" if self.remote_dns else "socks5"
         return f"{scheme}://{self.host}:{self.port}"
 
+    def server_address(self) -> str:
+        return f"{self.host}:{self.port}"
+
     def to_dict(self) -> dict:
         return {
             "type": "socks5",
@@ -177,8 +216,13 @@ class Socks5Upstream(Upstream):
     def _connect_once(self, host: str, port: int, t: float) -> socket.socket:
         try:
             sock = socket.create_connection((self.host, self.port), timeout=t)
+        except socket.timeout:
+            raise ProxyError(
+                f"上游代理 {self.host}:{self.port} 无响应（{t:.0f} 秒超时）。"
+                f"确认代理服务在运行、端口没被防火墙拦、IP 没变") from None
         except OSError as exc:
-            raise ProxyError(f"无法连接 SOCKS5 代理 {self.host}:{self.port} -> {exc}") from exc
+            raise ProxyError(
+                f"上游代理 {self.host}:{self.port} 连不上：{exc.strerror or exc}") from exc
         sock.settimeout(t)
         try:
             self.handshake(sock)
@@ -226,7 +270,11 @@ class Socks5Upstream(Upstream):
         if ver != SOCKS_VERSION:
             raise ProxyError("CONNECT 响应版本号异常")
         if rep != 0x00:
-            raise ProxyError(f"代理拒绝 CONNECT: {REP_MESSAGES.get(rep, f'未知错误码 {rep}')}")
+            # 0x02 才是"规则拒绝"，0x01 是代理自己出错（多半是它连不上目标），措辞要分开
+            detail = REP_MESSAGES.get(rep, f"未知错误码 {rep}")
+            if rep == 0x01:
+                raise ProxyError(f"代理没能连上 {host}:{port}：{detail}")
+            raise ProxyError(f"代理拒绝 CONNECT: {detail}")
         if atyp == ATYP_IPV4:
             recv_exact(sock, 4)
         elif atyp == ATYP_IPV6:
@@ -261,6 +309,9 @@ class HttpUpstream(Upstream):
         auth = f"{self.username}@" if self.username else ""
         return f"{scheme}://{auth}{self.host}:{self.port}"
 
+    def server_address(self) -> str:
+        return f"{self.host}:{self.port}"
+
     def to_dict(self) -> dict:
         return {
             "type": "http",
@@ -276,8 +327,13 @@ class HttpUpstream(Upstream):
         t = float(timeout or self.timeout)
         try:
             sock = socket.create_connection((self.host, self.port), timeout=t)
+        except socket.timeout:
+            raise ProxyError(
+                f"上游代理 {self.host}:{self.port} 无响应（{t:.0f} 秒超时）。"
+                f"确认代理服务在运行、端口没被防火墙拦、IP 没变") from None
         except OSError as exc:
-            raise ProxyError(f"无法连接 HTTP 代理 {self.host}:{self.port} -> {exc}") from exc
+            raise ProxyError(
+                f"上游代理 {self.host}:{self.port} 连不上：{exc.strerror or exc}") from exc
         try:
             sock.settimeout(t)
             if self.tls:

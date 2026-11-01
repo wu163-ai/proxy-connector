@@ -22,13 +22,19 @@ import tempfile
 import threading
 import time
 
-from .common import ProxyError, app_dir, free_port, wait_port
+from .common import JobGuard, ProxyError, app_dir, free_port, wait_port
 from .upstream import Socks5Upstream, Upstream
 
 SINGBOX_REPO = "SagerNet/sing-box"
 
 # ANSI 转义序列（sing-box 的日志级别染色）
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+# 内核日志里的网络层报错，用来把 "general SOCKS server failure" 还原成真实原因
+#   形如: open connection to example.com:443 using outbound/socks[proxy]:
+#         dial tcp 10.0.0.1:1080: i/o timeout
+_TUNNEL_RE = re.compile(r"open connection to (\[[^\]]+\]|[^\s:]+):(\d+)")
+_DIAL_RE = re.compile(r"dial tcp (\[[^\]]+\]|[^\s:]+):(\d+): ?(.*)$")
 
 
 # --------------------------------------------------------------------------
@@ -231,6 +237,8 @@ class ProcessSocksEngine(Upstream):
         self._tmpdir: str | None = None
         self._local: Socks5Upstream | None = None
         self._tail: list[str] = []
+        # 父进程被强杀时靠它连带清理子进程，避免 go.exe / sing-box.exe 变孤儿
+        self._job = JobGuard()
         if start_timeout:
             self.start_timeout = float(start_timeout)
 
@@ -280,6 +288,8 @@ class ProcessSocksEngine(Upstream):
                 stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                 text=True, encoding="utf-8", errors="replace", creationflags=flags,
             )
+            # 放进作业对象：本进程被强杀时，Windows 会连带结束这棵进程树
+            self._job.assign(proc)
             threading.Thread(target=self._pump, args=(proc,), daemon=True).start()
             # go run 编译期间内核一声不吭，界面会像卡死；这里按秒报等待时长
             stop_beat = threading.Event()
@@ -360,8 +370,13 @@ class ProcessSocksEngine(Upstream):
         try:
             return local.connect(host, port, timeout or self.timeout)
         except ProxyError as exc:
-            time.sleep(0.2)  # 等内核把错误写进管道
+            time.sleep(0.25)  # 等内核把错误写进管道
             hint = self._last_error_hint()
+            # socks inbound 只会回一句含糊的 "general SOCKS server failure"，
+            # 真实原因在内核日志里（dial tcp ... i/o timeout）。优先用真实原因。
+            diagnosis = self._diagnose(hint)
+            if diagnosis:
+                raise ProxyError(diagnosis) from None
             if hint:
                 raise ProxyError(f"{exc}（内核日志: {hint}）") from None
             raise
@@ -375,9 +390,56 @@ class ProcessSocksEngine(Upstream):
                     return text[-260:] if len(text) > 260 else text
         return ""
 
+    def _diagnose(self, hint: str) -> str:
+        """把内核的网络层报错翻译成人话，并点名是上游还是目标出的问题。"""
+        if not hint:
+            return ""
+        dial = _DIAL_RE.search(hint)
+        upstream = self._upstream_address()
+        tunnel = _TUNNEL_RE.search(hint)
+        target = f"{tunnel.group(1)}:{tunnel.group(2)}" if tunnel else ""
+
+        if not dial:
+            return ""
+        where = f"{dial.group(1)}:{dial.group(2)}"
+        raw = dial.group(3) or ""
+        is_upstream = bool(upstream) and where == upstream
+
+        if "i/o timeout" in raw or "timeout" in raw or "deadline exceeded" in raw:
+            what = "连接超时（端口无响应）"
+        elif "connection refused" in raw or "No connection could be made" in raw:
+            what = "端口未开放（连接被拒绝）"
+        elif "no route to host" in raw or "network is unreachable" in raw:
+            what = "网络不可达（路由或防火墙）"
+        elif "handshake" in raw or "EOF" in raw:
+            what = "握手被对端关闭"
+        else:
+            what = raw.strip() or "连接失败"
+
+        if is_upstream:
+            suffix = f"；目标 {target} 本身没问题，先修上游" if target else ""
+            return (f"上游代理 {where} 连不上：{what}{suffix}。"
+                    f"检查代理服务是否在跑、地址端口是否写错、防火墙是否放行")
+        shown = target or where
+        return f"经 {self._engine_label()} 访问 {shown} 失败：{what}"
+
+    def _upstream_address(self) -> str:
+        """这个引擎最终要连的那台代理服务器 host:port，用于判断是上游还是目标出错。"""
+        ob = getattr(self, "outbound", None)
+        if isinstance(ob, dict):
+            server = ob.get("server")
+            port = ob.get("server_port")
+            if server and port:
+                return f"{server}:{port}"
+        return ""
+
     def stop(self) -> None:
         with self._lock:
             self._cleanup_locked()
+
+    def server_address(self) -> str:
+        """真正要连的代理服务器，预检用它判断上游是否可达。"""
+        return self._upstream_address()
 
     def _cleanup_locked(self) -> None:
         proc, self._proc = self._proc, None
@@ -716,6 +778,9 @@ class OpenSshUpstream(ProcessSocksEngine):
     def describe(self) -> str:
         return f"ssh://{self.user}@{self.host}:{self.port}"
 
+    def server_address(self) -> str:
+        return f"{self.host}:{self.port}"
+
     def to_dict(self) -> dict:
         return {
             "type": "ssh",
@@ -853,6 +918,9 @@ class SshUpstream(Upstream):
 
     def describe(self) -> str:
         return f"ssh://{self.user}@{self.host}:{self.port}"
+
+    def server_address(self) -> str:
+        return f"{self.host}:{self.port}"
 
     def to_dict(self) -> dict:
         data = {
