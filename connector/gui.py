@@ -29,19 +29,52 @@ from .upstream import DirectUpstream, Socks5Upstream, Upstream, upstream_from_di
 FONT = ("Microsoft YaHei UI", 9)
 MONO = ("Consolas", 9)
 
-TYPE_LABELS = [
-    ("socks5", "SOCKS5"),
-    ("http", "HTTP 代理"),
-    ("ssh", "SSH"),
-    ("singbox", "sing-box 配置"),
-    ("direct", "直连"),
-]
-KIND_TO_LABEL = {kind: label for kind, label in TYPE_LABELS}
-LABEL_TO_KIND = {label: kind for kind, label in TYPE_LABELS}
-
 # sing-box 表单支持的协议（配置由程序拼，见 _build_singbox_outbound）
 SINGBOX_PROTOCOLS = ["socks", "http", "shadowsocks", "vmess", "vless",
                      "trojan", "hysteria2", "ssh"]
+
+
+def legacy_outbound(data: dict) -> dict:
+    """老配置（原生 socks5 / http / ssh / direct）转成等效的 sing-box outbound。
+
+    界面已经统一成 sing-box，但用户硬盘上的旧配置文件不能让他重填。
+    """
+    kind = (data.get("type") or "").lower()
+    if kind == "direct":
+        return {"type": "direct", "tag": "proxy"}
+    host = str(data.get("host") or "").strip()
+    try:
+        port = int(data.get("port") or 0)
+    except (TypeError, ValueError):
+        port = 0
+    if not host or not (0 < port < 65536):
+        return {}
+    user = data.get("username") or ""
+    pwd = data.get("password") or ""
+    if kind in ("socks5", "socks5h"):
+        ob = {"type": "socks", "tag": "proxy", "server": host,
+              "server_port": port, "version": "5"}
+        if user:
+            ob["username"] = user
+            ob["password"] = pwd
+        return ob
+    if kind == "http":
+        ob = {"type": "http", "tag": "proxy", "server": host, "server_port": port}
+        if user:
+            ob["username"] = user
+            ob["password"] = pwd
+        if data.get("tls"):
+            ob["tls"] = {"enabled": True, "server_name": host}
+        return ob
+    if kind == "ssh":
+        ob = {"type": "ssh", "tag": "proxy", "server": host, "server_port": port,
+              "user": data.get("user") or "root"}
+        if pwd:
+            ob["password"] = pwd
+        if data.get("key_path"):
+            ob["private_key_path"] = data["key_path"]
+        return ob
+    return {}
 
 LOG_COLORS = {
     "DEBUG": "#94a3b8",
@@ -148,13 +181,6 @@ class GuiApp:
 
         top = ttk.Frame(card)
         top.grid(row=0, column=0, sticky="ew")
-        ttk.Label(top, text="类型").pack(side="left")
-        self.type_var = tk.StringVar(value=KIND_TO_LABEL["socks5"])
-        self.type_box = ttk.Combobox(top, textvariable=self.type_var, state="readonly",
-                                     width=16, values=[lbl for _, lbl in TYPE_LABELS])
-        self.type_box.pack(side="left", padx=(6, 18))
-        self.type_box.bind("<<ComboboxSelected>>", lambda _e: self._switch_fields())
-
         ttk.Label(top, text="超时(秒)").pack(side="left")
         self.timeout_var = tk.StringVar(value="20")
         ttk.Spinbox(top, from_=1, to=600, textvariable=self.timeout_var,
@@ -176,17 +202,9 @@ class GuiApp:
         area.columnconfigure(0, weight=1)
         area.rowconfigure(0, weight=1)
 
-        self.frames = {
-            "socks5": self._frame_socks5(area),
-            "http": self._frame_http(area),
-            "ssh": self._frame_ssh(area),
-            "singbox": self._frame_singbox(area),
-            "direct": self._frame_direct(area),
-        }
-        for frame in self.frames.values():
-            frame.grid(row=0, column=0, sticky="ew")
-            frame.grid_remove()
-        self.frames["socks5"].grid()
+        # 只有一套表单：全部协议都交给 sing-box 内核，界面不再让人选类型
+        self.frame_sb = self._frame_singbox(area)
+        self.frame_sb.grid(row=0, column=0, sticky="ew")
 
     def _row(self, frame: ttk.Frame, specs: list[tuple], row: int = 0) -> None:
         """一行字段：specs = [(caption, var, width[, secret])]。"""
@@ -198,58 +216,6 @@ class GuiApp:
             ttk.Label(cell, text=caption).pack(anchor="w")
             ttk.Entry(cell, textvariable=var, width=width,
                       show="*" if secret else "").pack(fill="x")
-
-    def _frame_socks5(self, parent: ttk.Frame) -> ttk.Frame:
-        frame = ttk.Frame(parent)
-        self.v_s_host = tk.StringVar()
-        self.v_s_port = tk.StringVar(value="1080")
-        self.v_s_user = tk.StringVar()
-        self.v_s_pass = tk.StringVar()
-        self.v_s_rdns = tk.BooleanVar(value=True)
-        self._row(frame, [("代理地址", self.v_s_host, 24), ("端口", self.v_s_port, 8),
-                          ("用户名", self.v_s_user, 16), ("密码", self.v_s_pass, 16, True)])
-        ttk.Checkbutton(frame, text="远程 DNS（socks5h，推荐）",
-                        variable=self.v_s_rdns).grid(row=1, column=0, columnspan=4, sticky="w")
-        return frame
-
-    def _frame_http(self, parent: ttk.Frame) -> ttk.Frame:
-        frame = ttk.Frame(parent)
-        self.v_h_host = tk.StringVar()
-        self.v_h_port = tk.StringVar(value="8080")
-        self.v_h_user = tk.StringVar()
-        self.v_h_pass = tk.StringVar()
-        self.v_h_tls = tk.BooleanVar(value=False)
-        self._row(frame, [("代理地址", self.v_h_host, 24), ("端口", self.v_h_port, 8),
-                          ("用户名", self.v_h_user, 16), ("密码", self.v_h_pass, 16, True)])
-        ttk.Checkbutton(frame, text="TLS 连接代理（https://）",
-                        variable=self.v_h_tls).grid(row=1, column=0, columnspan=4, sticky="w")
-        return frame
-
-    def _frame_ssh(self, parent: ttk.Frame) -> ttk.Frame:
-        frame = ttk.Frame(parent)
-        self.v_q_host = tk.StringVar()
-        self.v_q_port = tk.StringVar(value="22")
-        self.v_q_user = tk.StringVar(value="root")
-        self.v_q_pass = tk.StringVar()
-        self.v_q_key = tk.StringVar()
-        self.v_q_engine = tk.StringVar(value="auto")
-        self._row(frame, [("主机", self.v_q_host, 24), ("端口", self.v_q_port, 8),
-                          ("用户名", self.v_q_user, 14), ("密码", self.v_q_pass, 16, True)], row=0)
-        self._row(frame, [("私钥路径（留空用默认密钥 / ssh-agent）", self.v_q_key, 40)], row=1)
-        cell = ttk.Frame(frame)
-        cell.grid(row=1, column=1, sticky="ew", padx=(0, 12), pady=(0, 6))
-        ttk.Label(cell, text="引擎").pack(anchor="w")
-        ttk.Combobox(cell, textvariable=self.v_q_engine, state="readonly", width=26,
-                     values=["auto", "singbox", "openssh"]).pack(fill="x")
-        cell2 = ttk.Frame(frame)
-        cell2.grid(row=1, column=2, sticky="ew", padx=(0, 12), pady=(0, 6))
-        ttk.Label(cell2, text="sing-box 运行时").pack(anchor="w")
-        self.v_q_runtime = tk.StringVar(value="auto")
-        ttk.Combobox(cell2, textvariable=self.v_q_runtime, state="readonly", width=10,
-                     values=["auto", "source", "binary"]).pack(fill="x")
-        ttk.Label(frame, text="密码登录需要 sing-box 内核；纯密钥可直接用系统 OpenSSH。",
-                  style="Hint.TLabel").grid(row=2, column=0, columnspan=4, sticky="w")
-        return frame
 
     def _frame_singbox(self, parent: ttk.Frame) -> ttk.Frame:
         """只填服务器/端口/账号密码，配置由程序生成，不用碰 JSON。"""
@@ -286,8 +252,11 @@ class GuiApp:
                    command=self._preview_singbox).pack(side="left", padx=(14, 0))
         ttk.Label(bar, text="运行时").pack(side="left", padx=(14, 0))
         self.v_sb_runtime = tk.StringVar(value="auto")
-        ttk.Combobox(bar, textvariable=self.v_sb_runtime, state="readonly", width=9,
-                     values=["auto", "source", "binary"]).pack(side="left", padx=6)
+        self.cb_runtime = ttk.Combobox(bar, textvariable=self.v_sb_runtime, state="readonly",
+                                       width=9, values=["auto", "source", "binary"])
+        self.cb_runtime.pack(side="left", padx=6)
+        self.cb_runtime.bind("<<ComboboxSelected>>",
+                             lambda _e: self._update_status())
         self.lbl_sb_hint = ttk.Label(frame, text="", style="Hint.TLabel")
         self.lbl_sb_hint.grid(row=4, column=0, sticky="w", pady=(6, 0))
         self._sync_singbox_fields()
@@ -307,20 +276,6 @@ class GuiApp:
             "ssh": "填用户名和密码。密码登录依赖 sing-box 的 ssh 出站。",
         }.get(proto, "")
         self.lbl_sb_hint.configure(text=hint)
-
-    def _frame_direct(self, parent: ttk.Frame) -> ttk.Frame:
-        frame = ttk.Frame(parent)
-        ttk.Label(frame, text="不走代理，直接连接。用于对照测试出口 IP 或排查代理问题。",
-                  style="Hint.TLabel").pack(anchor="w", pady=8)
-        return frame
-
-    def _switch_fields(self) -> None:
-        kind = LABEL_TO_KIND.get(self.type_var.get(), "socks5")
-        for name, frame in self.frames.items():
-            if name == kind:
-                frame.grid()
-            else:
-                frame.grid_remove()
 
     def _text_panel(self, parent) -> tuple[ttk.Frame, tk.Text]:
         wrap = ttk.Frame(parent)
@@ -627,106 +582,48 @@ class GuiApp:
             return 20.0
 
     def _collect_config(self) -> dict:
-        kind = LABEL_TO_KIND.get(self.type_var.get(), "socks5")
-        payload: dict = {"type": kind, "timeout": self._timeout()}
-        if kind == "socks5":
-            host = self.v_s_host.get().strip()
-            if not host:
-                raise ValueError("请填写 SOCKS5 代理地址")
-            port = int(self.v_s_port.get().strip() or "0")
-            if not 0 < port < 65536:
-                raise ValueError("代理端口无效")
-            payload.update({
-                "host": host, "port": port,
-                "username": self.v_s_user.get().strip(),
-                "password": self.v_s_pass.get(),
-                "remote_dns": self.v_s_rdns.get(),
-            })
-        elif kind == "http":
-            host = self.v_h_host.get().strip()
-            if not host:
-                raise ValueError("请填写 HTTP 代理地址")
-            port = int(self.v_h_port.get().strip() or "0")
-            if not 0 < port < 65536:
-                raise ValueError("代理端口无效")
-            payload.update({
-                "host": host, "port": port,
-                "username": self.v_h_user.get().strip(),
-                "password": self.v_h_pass.get(),
-                "tls": self.v_h_tls.get(),
-            })
-        elif kind == "ssh":
-            host = self.v_q_host.get().strip()
-            if not host:
-                raise ValueError("请填写 SSH 主机")
-            port = int(self.v_q_port.get().strip() or "22")
-            if not 0 < port < 65536:
-                raise ValueError("SSH 端口无效")
-            payload.update({
-                "host": host, "port": port,
-                "user": self.v_q_user.get().strip() or "root",
-                "password": self.v_q_pass.get(),
-                "key_path": self.v_q_key.get().strip(),
-                "engine": self.v_q_engine.get() or "auto",
-                "runtime": self.v_q_runtime.get() or "auto",
-            })
-        elif kind == "singbox":
-            payload["outbound"] = self._build_singbox_outbound()
-            payload["runtime"] = self.v_sb_runtime.get() or "auto"
-        return payload
+        """表单只有一个来源：拼一条 sing-box outbound 交给内核。"""
+        return {
+            "type": "singbox",
+            "outbound": self._build_singbox_outbound(),
+            "runtime": self.v_sb_runtime.get() or "auto",
+            "timeout": self._timeout(),
+        }
 
     def _fill_form(self, upstream: Upstream) -> None:
+        """把上游回填到唯一的 sing-box 表单；老配置自动迁移成等效 outbound。"""
         data = upstream.to_dict()
-        kind = data.get("type", "socks5")
-        self.type_var.set(KIND_TO_LABEL.get(kind, KIND_TO_LABEL["socks5"]))
-        self._switch_fields()
         self.timeout_var.set(str(int(data.get("timeout") or 20)))
-        if kind in ("socks5", "socks5h"):
-            self.v_s_host.set(data.get("host", ""))
-            self.v_s_port.set(str(data.get("port", "")))
-            self.v_s_user.set(data.get("username", "") or "")
-            self.v_s_pass.set(data.get("password", "") or "")
-            self.v_s_rdns.set(bool(data.get("remote_dns", True)))
-        elif kind == "http":
-            self.v_h_host.set(data.get("host", ""))
-            self.v_h_port.set(str(data.get("port", "")))
-            self.v_h_user.set(data.get("username", "") or "")
-            self.v_h_pass.set(data.get("password", "") or "")
-            self.v_h_tls.set(bool(data.get("tls")))
-        elif kind == "ssh":
-            self.v_q_host.set(data.get("host", ""))
-            self.v_q_port.set(str(data.get("port", 22)))
-            self.v_q_user.set(data.get("user", "root"))
-            self.v_q_pass.set(data.get("password", "") or "")
-            self.v_q_key.set(data.get("key_path", "") or "")
-            self.v_q_engine.set(data.get("engine", "auto"))
-            self.v_q_runtime.set(data.get("runtime", "auto"))
-        elif kind == "singbox":
-            self.v_sb_runtime.set(data.get("runtime", "auto"))
-            ob: dict = {}
-            if isinstance(data.get("outbound"), dict):
-                ob = data["outbound"]
-            elif isinstance(data.get("config"), dict):
-                cfg = data["config"]
-                outs = [o for o in (cfg.get("outbounds") or []) if isinstance(o, dict)]
-                route = cfg.get("route") if isinstance(cfg.get("route"), dict) else {}
-                by_tag = {o.get("tag"): o for o in outs if o.get("tag")}
-                ob = by_tag.get(route.get("final")) or next(
-                    (o for o in outs if o.get("type") not in ("direct", "block")), {})
-            if ob:
-                proto = ob.get("type") or "socks"
-                if proto in SINGBOX_PROTOCOLS:
-                    self.v_sb_proto.set(proto)
-                self.v_sb_host.set(str(ob.get("server") or ""))
-                self.v_sb_port.set(str(ob.get("server_port") or ""))
-                self.v_sb_user.set(str(ob.get("uuid") or ob.get("username")
-                                      or ob.get("user") or ""))
-                self.v_sb_pass.set(str(ob.get("password") or ""))
-                self.v_sb_method.set(str(ob.get("method") or "aes-128-gcm"))
-                tls = ob.get("tls") if isinstance(ob.get("tls"), dict) else {}
-                self.v_sb_sni.set(str(tls.get("server_name") or ""))
-                self.v_sb_tls.set(bool(tls.get("enabled")))
-            self._sync_singbox_fields()
+        self.v_sb_runtime.set(data.get("runtime") or "auto")
+
+        ob: dict = {}
+        if isinstance(data.get("outbound"), dict):
+            ob = data["outbound"]
+        elif isinstance(data.get("config"), dict):
+            cfg = data["config"]
+            outs = [o for o in (cfg.get("outbounds") or []) if isinstance(o, dict)]
+            route = cfg.get("route") if isinstance(cfg.get("route"), dict) else {}
+            by_tag = {o.get("tag"): o for o in outs if o.get("tag")}
+            ob = by_tag.get(route.get("final")) or next(
+                (o for o in outs if o.get("type") not in ("direct", "block")), {})
+        else:
+            ob = legacy_outbound(data)   # 老配置：socks5 / http / ssh / direct
+
+        if ob:
+            proto = ob.get("type") or "socks"
+            if proto in SINGBOX_PROTOCOLS:
+                self.v_sb_proto.set(proto)
+            self.v_sb_host.set(str(ob.get("server") or ""))
+            self.v_sb_port.set(str(ob.get("server_port") or ""))
+            self.v_sb_user.set(str(ob.get("uuid") or ob.get("username")
+                                  or ob.get("user") or ""))
+            self.v_sb_pass.set(str(ob.get("password") or ""))
+            self.v_sb_method.set(str(ob.get("method") or "aes-128-gcm"))
+            tls = ob.get("tls") if isinstance(ob.get("tls"), dict) else {}
+            self.v_sb_sni.set(str(tls.get("server_name") or ""))
+            self.v_sb_tls.set(bool(tls.get("enabled")))
+        self._sync_singbox_fields()
+
 
     def _build_singbox_outbound(self) -> dict:
         """把几个输入框拼成 sing-box 的一条 outbound，不用人写 JSON。"""
@@ -820,19 +717,10 @@ class GuiApp:
 
     def _clear_form(self) -> None:
         """没有任何配置时，把表单留空，不塞占位地址。"""
-        self.type_var.set(KIND_TO_LABEL["socks5"])
-        self._switch_fields()
         self.timeout_var.set("20")
-        for var in (self.v_s_host, self.v_s_port, self.v_s_user, self.v_s_pass,
-                    self.v_h_host, self.v_h_port, self.v_h_user, self.v_h_pass,
-                    self.v_q_host, self.v_q_port, self.v_q_user, self.v_q_pass,
-                    self.v_q_key, self.v_sb_host, self.v_sb_port, self.v_sb_user,
+        for var in (self.v_sb_host, self.v_sb_port, self.v_sb_user,
                     self.v_sb_pass, self.v_sb_sni):
             var.set("")
-        self.v_s_rdns.set(True)
-        self.v_h_tls.set(False)
-        self.v_q_engine.set("auto")
-        self.v_q_runtime.set("auto")
         self.v_sb_runtime.set("auto")
         self.v_sb_proto.set("socks")
         self.v_sb_method.set("aes-128-gcm")
@@ -846,11 +734,17 @@ class GuiApp:
         source = find_singbox_source()
         go = find_go_binary()
         binary = find_singbox_binary()
-        if source and go:
+        # 显示的是这次真正会用的运行方式，不是"有源码就一定用源码"
+        runtime = (self.v_sb_runtime.get() or "auto").lower()
+        use_source = runtime == "source" or (runtime == "auto" and bool(source and go))
+        if use_source and source and go:
             name = os.path.basename(str(source).rstrip("\\/"))
             engine = f"sing-box 源码 {name} · go run"
         elif binary:
             engine = f"sing-box {os.path.basename(binary)}"
+        elif source and go:
+            name = os.path.basename(str(source).rstrip("\\/"))
+            engine = f"sing-box 源码 {name} · go run（选 binary 但没找到 exe）"
         else:
             engine = "sing-box 未找到源码或可执行文件"
         if self._connected and self.proxy and self.proxy.running:
@@ -860,7 +754,7 @@ class GuiApp:
         elif self._has_upstream:
             text = f"未连接 · 参数已就绪 {self.upstream.describe()}"
         else:
-            text = "未连接 · 选择类型并填写地址后点「连接」"
+            text = "未连接 · 填好服务器和端口后点「连接」"
         self.status_label.configure(text=f"{text}    |    {engine}")
 
     def _set_busy(self, busy: bool, text: str = "") -> None:

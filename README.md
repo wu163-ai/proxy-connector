@@ -1,18 +1,24 @@
 # 代理连接器 v2
 
-一个纯 Python 标准库实现的代理连接器。上游支持 **SOCKS5 / HTTP / SSH / sing-box 任意出站协议**，点一次「连接」就在本机开监听并持有系统代理，浏览器和各类软件立刻走代理。
+一个纯 Python 标准库实现的代理连接器。桌面界面只有一个表单：**选协议、填服务器和端口，点「连接」**，本机开监听并接管系统代理，浏览器立刻走代理。
 
-零第三方依赖。sing-box 只是一个可选内核，只在需要高级协议（shadowsocks、vmess、trojan、hysteria2 等）时才会用到。
+出站全部交给 sing-box 内核执行（`go run` 源码或 `bin/sing-box.exe`），所以一套界面覆盖 socks / http / shadowsocks / vmess / vless / trojan / hysteria2 / ssh。没有"类型"下拉，不用记哪个协议该填哪个框。
 
-## 支持的上游
+## 界面里的协议
 
-| 类型 | 地址写法 | 认证 | 说明 |
-|---|---|---|---|
-| SOCKS5 | `socks5h://host:1080`<br>`socks5://user:pass@host:1080` | 无 / RFC1929 | 原生实现，最轻。`socks5h` 远程 DNS，`socks5` 本地 DNS |
-| HTTP | `http://user:pass@host:8080`<br>`https://user:pass@host:8443` | Basic | 原生 CONNECT 隧道；`https://` 表示 TLS 连到代理本身 |
-| SSH | `ssh://root@host:22` | 密码 / 私钥 / agent | 密码登录走 sing-box；纯密钥可退回系统 OpenSSH |
-| sing-box | `config.json`（完整配置）<br>`outbound.json`（单条出口） | 由配置决定 | 官方配置文件整份吃进去，dns/route/endpoints/experimental 全保留，只替换入站。支持全部协议：shadowsocks、vmess、vless、trojan、hysteria2、tuic、anytls、socks、http、ssh… |
-| 直连 | `direct` | - | 不走代理，用于对照测试 |
+| 协议 | 「服务器 / 端口」填什么 | 「用户名 / UUID」 | 「密码」 | 额外 |
+|---|---|---|---|---|
+| **socks** | SOCKS5 代理地址和端口 | 有认证才填 | 有认证才填 | — |
+| **http** | HTTP 代理地址和端口 | 有 Basic 认证才填 | 同上 | 勾 TLS 表示连代理本身走 https |
+| **shadowsocks** | 服务器和端口 | 留空 | 密码 | 必填「加密方式」 |
+| **vmess / vless** | 服务器和端口 | **UUID** | 留空 | 可勾 TLS + SNI |
+| **trojan** | 服务器和端口 | 留空 | 密码 | TLS 自动开 |
+| **hysteria2** | 服务器和端口 | 留空 | 密码 | TLS 自动开 |
+| **ssh** | SSH 主机和端口 | 登录用户名 | 密码 | 私钥请用命令行 `--key` |
+
+点「看程序生成的配置」可以看到最终交给内核的完整 JSON，不用信文档。
+
+命令行仍然接受各种 URL 写法（`socks5h://`、`http://`、`ssh://`、`direct`、`config.json`），见下文「命令行」。
 
 ## 快速开始
 
@@ -26,7 +32,7 @@ python socks5_connector.py
 
 ![界面](gui.png)
 
-顶部选上游类型、填参数，点「连接」。
+选协议（默认 socks）、填服务器和端口，点「连接」。
 
 ## 「连接」到底做了什么
 
@@ -142,9 +148,9 @@ python socks5_connector.py install-singbox --proxy socks5h://1.2.3.4:1080
 python socks5_connector.py probe --proxy outbound.json --runtime binary
 ```
 
-### sing-box：填框就行，配置程序自己拼
+### 配置由程序拼，不用写 JSON
 
-选「sing-box 配置」，只出现几个输入框：**协议 / 服务器 / 端口 / 用户名（UUID）/ 密码**，另加加密方式、SNI、TLS。填完点「连接」，程序按官方结构自己拼出完整配置：
+界面就几个输入框：**协议 / 服务器 / 端口 / 用户名（UUID）/ 密码**，另加加密方式、SNI、TLS。填完点「连接」，程序按官方结构自己拼出完整配置：
 
 ```json
 {
