@@ -126,6 +126,7 @@ class GuiApp:
         style.configure("Good.TLabel", foreground="#15803d", font=("Microsoft YaHei UI", 9, "bold"))
 
     def _build(self) -> None:
+        self.local_port_var = tk.StringVar(value=str(self.local_port))
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(1, weight=3)
         self.root.rowconfigure(2, weight=2)
@@ -332,7 +333,6 @@ class GuiApp:
         self._build_probe_page()
         self._build_fetch_page()
         self._build_tunnel_page()
-        self._build_http_proxy_page()
         self._build_kernel_page()
 
     def _build_probe_page(self) -> None:
@@ -404,34 +404,6 @@ class GuiApp:
         wrap, self.txt_tun = self._text_panel(page)
         wrap.grid(row=2, column=0, sticky="nsew", pady=(8, 0))
         self._write(self.txt_tun, "本地监听一个 TCP 端口，所有连接经上游送到目标。适合 SSH / MySQL / RDP 等任意 TCP 服务。\n")
-
-    def _build_http_proxy_page(self) -> None:
-        """已并入「连接」：本地混合代理同时提供 HTTP 与 SOCKS5，这里只显示状态。"""
-        page = ttk.Frame(self.nb, padding=10)
-        self.nb.add(page, text="  本地代理状态  ")
-        page.columnconfigure(0, weight=1)
-        page.rowconfigure(2, weight=1)
-
-        bar = ttk.Frame(page)
-        bar.grid(row=0, column=0, sticky="ew")
-        ttk.Label(bar, text="本地监听端口").pack(side="left")
-        self.local_port_var = tk.StringVar(value="1081")
-        ttk.Spinbox(bar, from_=1024, to=65535, textvariable=self.local_port_var,
-                    width=8).pack(side="left", padx=6)
-        ttk.Label(bar, text="浏览器和软件就指这个端口；被占用会自动顺延，改完点「连接」生效",
-                  style="Hint.TLabel").pack(side="left", padx=(6, 0))
-
-        self.lbl_hp = ttk.Label(page, text="未连接", style="Hint.TLabel")
-        self.lbl_hp.grid(row=1, column=0, sticky="w", pady=(8, 0))
-
-        wrap, self.txt_hp = self._text_panel(page)
-        wrap.grid(row=2, column=0, sticky="nsew", pady=(8, 0))
-        self._write(self.txt_hp,
-                    "点上方「连接」后，本机会监听一个混合端口，同时支持：\n"
-                    "  · HTTP/HTTPS 代理（浏览器、系统代理、只认 HTTP 代理的软件）\n"
-                    "  · SOCKS5（支持 socks5 的软件、curl --socks5-hostname）\n"
-                    "这个端口是给本机程序用的入口，不是你的代理服务器端口。\n"
-                    "勾了「接管系统代理」的话，程序会自动把系统代理指过来，你不用管它。\n")
 
     def _build_kernel_page(self) -> None:
         """sing-box / ssh 内核的原始输出，一行不改，原样展示。"""
@@ -982,8 +954,6 @@ class GuiApp:
             self.log("INFO", "未接管系统代理，仅提供本地端口 127.0.0.1:%d" % proxy.port)
 
         self._update_status()
-        self.lbl_hp.configure(text=f"运行中：127.0.0.1:{proxy.port}（SOCKS5 + HTTP）",
-                             style="Good.TLabel")
         self.log("OK", f"已连接  本地 127.0.0.1:{proxy.port} (SOCKS5+HTTP) "
                        f"-> {new_upstream.describe()}")
         self._verify_link(proxy.port)
@@ -995,7 +965,6 @@ class GuiApp:
         self._connected = False
         self.btn_connect.configure(state="normal")
         self.btn_disconnect.configure(state="disabled")
-        self.lbl_hp.configure(text="未连接", style="Hint.TLabel")
         self._update_status()
         self.log("INFO", "已断开")
 
@@ -1182,9 +1151,6 @@ class GuiApp:
         self.lbl_tun.configure(text="已停止", style="Hint.TLabel")
         self.btn_tun_start.configure(state="normal")
         self.btn_tun_stop.configure(state="disabled")
-
-    def do_http_proxy_stop(self) -> None:
-        self.disconnect()
 
     # ------------------------------------------------------------------
     # 生命周期

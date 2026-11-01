@@ -130,6 +130,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_install.add_argument("--version", default="latest", help="如 v1.14.3，默认最新")
     p_install.add_argument("--dir", default=None, help="安装目录，默认程序目录/bin")
 
+    p_fix = sub.add_parser("fix-proxy", help="还原被强杀后残留的系统代理设置")
+    p_fix.add_argument("--config", default=None,
+                       help="配置文件路径（备份文件在它旁边），默认找程序目录")
+
     return parser
 
 
@@ -370,6 +374,35 @@ def cmd_install(args) -> int:
     return 0
 
 
+def cmd_fix_proxy(args) -> int:
+    """程序被强杀后系统代理可能留在死端口，这个命令把它还原。"""
+    from connector.sysproxy import SystemProxy
+
+    folders = [app_dir()]
+    if args.config:
+        folders.append(os.path.dirname(os.path.abspath(args.config)))
+    restored = False
+    for folder in dict.fromkeys(folders):
+        state = os.path.join(folder, "system_proxy_backup.json")
+        if not os.path.exists(state):
+            continue
+        print(f"找到遗留备份: {state}")
+        try:
+            with open(state, "r", encoding="utf-8") as fh:
+                print(f"  备份内容: {json.load(fh)}")
+        except (OSError, ValueError):
+            pass
+        proxy = SystemProxy(state_path=state, log=_cli_log)
+        if proxy.restore_leftover():
+            restored = True
+
+    current = SystemProxy()
+    print(f"当前系统代理: {current.read()}")
+    if not restored:
+        print("没有遗留备份，系统代理保持原样")
+    return 0
+
+
 # --------------------------------------------------------------------------
 # 入口
 # --------------------------------------------------------------------------
@@ -396,6 +429,8 @@ def main(argv=None) -> int:
         return cmd_proxy(args)
     if command == "install-singbox":
         return cmd_install(args)
+    if command == "fix-proxy":
+        return cmd_fix_proxy(args)
     parser.print_help()
     return 1
 
