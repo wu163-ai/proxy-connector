@@ -1,5 +1,7 @@
 # 代理连接器 v2
 
+**[下载 Windows 版](https://github.com/wu163-ai/proxy-connector/releases)** — exe + 内核一起给，解压即用，不用装 Python。
+
 一个纯 Python 标准库实现的代理连接器。桌面界面只有一个表单：**选协议、填服务器和端口，点「连接」**，本机开监听并接管系统代理，浏览器立刻走代理。
 
 出站全部交给 sing-box 内核执行（`go run` 源码或 `bin/sing-box.exe`），所以一套界面覆盖 socks / http / shadowsocks / vmess / vless / trojan / hysteria2 / ssh。没有"类型"下拉，不用记哪个协议该填哪个框。
@@ -198,18 +200,29 @@ python socks5_connector.py probe --proxy config.json --target www.google.com:443
 
 ## 打包成 exe
 
-需要 PyInstaller（`py -3.14 -m pip install pyinstaller`），然后双击 `build-exe.bat`，或：
+**不想自己打包**，直接去 [Releases](https://github.com/wu163-ai/proxy-connector/releases) 下载：
+
+```
+proxy-connector.exe            主程序，13 MB
+sing-box-windows-amd64.zip     内核，解压出 bin/ 放到 exe 同级
+```
+
+两个文件放同一目录即可，目标机器不需要装 Python。
+
+自己打包需要 PyInstaller（`py -3.14 -m pip install pyinstaller`），然后双击 `build-exe.bat`，或：
 
 ```bash
 py -3.14 -m PyInstaller --noconfirm --clean -F -w -n proxy-connector --collect-submodules connector socks5_connector.py
 ```
 
-产物 `dist\proxy-connector.exe`，约 13 MB，单文件，双击即用，目标机器不需要装 Python。
+产物 `dist\proxy-connector.exe`，约 13 MB，单文件，双击即用。
 
 几个要点：
 
 - **位置**：exe 和 `bin\`、`sing-box\` 放同一目录。程序会按 exe 所在位置找内核和配置文件
   （`sys.frozen` 判断），不会跑到打包时的临时解压目录里。
+- **内核查找**：`auto` 优先用 `bin\sing-box.exe`（秒开），没有 exe 才回落到 `go run` 源码。
+  打包后不会往父目录找源码，避免误用无关目录里的代码。
 - **`-w`**：无控制台模式，适合纯 GUI。要用 `probe` / `fetch` 这些命令就留着控制台，
   去掉 `-w` 重新打包。
 - **启动耗时**：单文件模式启动时先解压到临时目录，首启多 1–2 秒。
