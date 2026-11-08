@@ -734,9 +734,14 @@ class GuiApp:
         source = find_singbox_source()
         go = find_go_binary()
         binary = find_singbox_binary()
-        # 显示的是这次真正会用的运行方式，不是"有源码就一定用源码"
+        # 显示这次真正会用的运行方式：auto 现在是 exe 优先，没 exe 才回落到源码
         runtime = (self.v_sb_runtime.get() or "auto").lower()
-        use_source = runtime == "source" or (runtime == "auto" and bool(source and go))
+        if runtime == "source":
+            use_source = True
+        elif runtime == "binary":
+            use_source = False
+        else:
+            use_source = not binary and bool(source and go)
         if use_source and source and go:
             name = os.path.basename(str(source).rstrip("\\/"))
             engine = f"sing-box 源码 {name} · go run"

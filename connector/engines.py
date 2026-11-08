@@ -18,6 +18,7 @@ import platform
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -96,8 +97,10 @@ def find_singbox_source(explicit: str | None = None) -> str | None:
     candidates = [
         os.path.join(root, "sing-box"),
         os.path.join(root, "sing-box-src"),
-        os.path.join(root, "..", "sing-box"),
     ]
+    # 只有源码运行时才允许往上一层找；打包成 exe 后越界搜索会误用别人目录里的源码
+    if not getattr(sys, "frozen", False):
+        candidates.append(os.path.join(root, "..", "sing-box"))
     for base in candidates:
         if valid(base):
             return os.path.abspath(base)
@@ -492,15 +495,17 @@ class SingBoxUpstream(ProcessSocksEngine):
             return "source", self._require_source()
         if self.runtime == "binary":
             return "binary", self._require_binary()
-        # auto：源码优先
+        # auto：现成的 exe 优先。
+        # go run 每次都要重新链接整个二进制（17–24 秒），有 exe 就没理由让用户等。
+        # 想跑源码（改完立即生效）就显式把「运行时」切成 source。
+        binary = find_singbox_binary(self.binary)
+        if binary:
+            return "binary", binary
         src = find_singbox_source(self.source)
         go = find_go_binary(self.go)
         if src and go:
             self._source_dir, self._go_bin = src, go
             return "source", src
-        binary = find_singbox_binary(self.binary)
-        if binary:
-            return "binary", binary
         raise ProxyError(self._missing_hint())
 
     def _require_source(self) -> str:
@@ -530,8 +535,9 @@ class SingBoxUpstream(ProcessSocksEngine):
         return binary
 
     def _missing_hint(self) -> str:
-        return ("没有可用的 sing-box 内核：既找不到源码（含 go.mod 的仓库目录），"
-                "也找不到可执行文件。克隆仓库到程序目录的 sing-box/，或运行 install-singbox")
+        return ("没有可用的 sing-box 内核：既找不到 bin/sing-box.exe，也找不到源码。"
+                "把 sing-box.exe 放进程序目录的 bin/ 下，"
+                "或运行 `socks5_connector.py install-singbox` 自动下载")
 
     # ---- 展示 ----
     def _engine_label(self) -> str:

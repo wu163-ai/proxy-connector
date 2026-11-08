@@ -31,3 +31,8 @@ bin/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# 发布用的临时脚本，不进仓库
+_release.py
+_release_state.json
+_upload_asset.py
